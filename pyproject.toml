@@ -1,0 +1,128 @@
+[build-system]
+requires = ["hatchling>=1.28"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-team"
+version = "0.1.0"
+description = "A local multi-agent system using OpenAI agents and MCP tools."
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "mcp[cli]>=2.0.0",
+    "openai-agents>=0.22.0",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+agent-team = "agent_team.interfaces.cli.agent_cli:main"
+agent-team-audit = "agent_team.interfaces.cli.audit_cli:main"
+agent-team-eval = "agent_team.interfaces.cli.eval_cli:main"
+agent-team-workflow-mcp = "agent_team.infrastructure.mcp.server.workflow_mcp_entrypoint:main"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.3",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 79
+indent-width = 4
+src = ["src", "tests"]
+exclude = [".venv"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_team"]
+
+[tool.ruff.lint]
+select = [
+    "ANN",  # Type annotations
+    "ARG",  # Unused arguments
+    "B",    # Bugbear
+    "C4",   # Comprehensions
+    "C90",  # Complexity
+    "D",    # Docstrings
+    "E",    # PEP 8 errors
+    "F",    # Pyflakes
+    "I",    # Import ordering
+    "N",    # PEP 8 naming
+    "PL",   # Pylint rules
+    "RET",  # Return statements
+    "RUF",  # Ruff-specific rules
+    "S",    # Security checks
+    "SIM",  # Simplification
+    "UP",   # Modern Python syntax
+    "W",    # PEP 8 warnings
+]
+ignore = [
+    "D203",  # Conflicts with D211
+    "D213",  # Conflicts with D212
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",     # Assert is expected in tests
+    "PLR2004",  # Literal values are expected in tests
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-branches = 10
+max-returns = 6
+max-statements = 50
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = [".venv"]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+reportMissingTypeStubs = "warning"
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "ollama: marks tests that require a live local Ollama runtime.",
+    "ollama_eval: marks tests that require live local Ollama evaluations.",
+]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "--cov=agent_team",
+    "--cov-branch",
+    "--cov-report=term-missing",
+    "--cov-fail-under=90",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["agent_team"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 100
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

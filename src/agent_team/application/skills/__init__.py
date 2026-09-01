@@ -1,0 +1,1 @@
+"""Agent skill application package."""

@@ -1,0 +1,71 @@
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Coverage and test reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Build and packaging output
+dist/
+build/
+wheels/
+*.egg-info/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+.secrets/
+secrets.*
+credentials.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+
+# Local Agent Team state and generated evaluation results
+.agent_team/
+evals/results/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE and editor files
+.idea/
+.vscode/
+.fleet/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
