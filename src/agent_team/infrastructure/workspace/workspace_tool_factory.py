@@ -32,6 +32,7 @@ from agent_team.domain.workspace.code_search_result import CodeSearchResult
 from agent_team.domain.workspace.patch_application_result import (
     PatchApplicationResult,
 )
+from agent_team.domain.workspace.symbol_search_result import SymbolSearchResult
 from agent_team.domain.workspace.workspace_access_denied_error import (
     WorkspaceAccessDeniedError,
 )
@@ -57,6 +58,7 @@ READ_ONLY_WORKSPACE_TOOLS = frozenset(
     {
         WorkspaceToolName.LIST_FILES,
         WorkspaceToolName.SEARCH_CODE,
+        WorkspaceToolName.FIND_SYMBOL,
         WorkspaceToolName.READ_FILE,
         WorkspaceToolName.RUN_CHECK,
     },
@@ -104,6 +106,18 @@ class WorkspaceToolFactory:
                 arguments_json,
             )
 
+        async def find_symbol(
+            _context: ToolContext[Any],
+            arguments_json: str,
+        ) -> dict[str, object]:
+            return self._invoke(
+                profile,
+                run,
+                task,
+                WorkspaceToolName.FIND_SYMBOL,
+                arguments_json,
+            )
+
         async def read_file(
             _context: ToolContext[Any],
             arguments_json: str,
@@ -143,6 +157,7 @@ class WorkspaceToolFactory:
         callbacks = {
             WorkspaceToolName.LIST_FILES: list_files,
             WorkspaceToolName.SEARCH_CODE: search_code,
+            WorkspaceToolName.FIND_SYMBOL: find_symbol,
             WorkspaceToolName.READ_FILE: read_file,
             WorkspaceToolName.APPLY_PATCH: apply_patch,
             WorkspaceToolName.RUN_CHECK: run_check,
@@ -307,6 +322,12 @@ def _call_service(
             task,
             _required_text(arguments, "query"),
         )
+    if tool is WorkspaceToolName.FIND_SYMBOL:
+        return service.find_symbol(
+            profile,
+            task,
+            _required_text(arguments, "name"),
+        )
     if tool is WorkspaceToolName.READ_FILE:
         return service.read_file(
             profile,
@@ -389,6 +410,21 @@ def _result_payload(result: object) -> dict[str, object]:
                     "line_excerpt": match.line_excerpt,
                 }
                 for match in result.matches
+            ],
+            "truncated": result.truncated,
+        }
+    if isinstance(result, SymbolSearchResult):
+        return {
+            "query_hash": result.query_hash,
+            "definitions": [
+                {
+                    "path": definition.path,
+                    "line_number": definition.line_number,
+                    "name": definition.name,
+                    "qualified_name": definition.qualified_name,
+                    "kind": definition.kind,
+                }
+                for definition in result.definitions
             ],
             "truncated": result.truncated,
         }
@@ -475,6 +511,20 @@ def _tool_schema(
             },
             ["query"],
         )
+    if tool is WorkspaceToolName.FIND_SYMBOL:
+        return _object_schema(
+            {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Exact class, function, or method name to locate. "
+                        "Qualified names such as AuthService.logout are "
+                        "supported."
+                    ),
+                },
+            },
+            ["name"],
+        )
     if tool is WorkspaceToolName.READ_FILE:
         return _object_schema(
             {
@@ -546,6 +596,11 @@ def _tool_description(tool: WorkspaceToolName) -> str:
         WorkspaceToolName.SEARCH_CODE: (
             "Search visible workspace files for literal code, symbol names, "
             "or related behavior before creating new implementation elements."
+        ),
+        WorkspaceToolName.FIND_SYMBOL: (
+            "Locate exact class, function, or method definitions in current "
+            "workspace contents. Developer agents must use this before "
+            "creating a proposed symbol, then read any matching file."
         ),
         WorkspaceToolName.READ_FILE: (
             "Read bounded content from one visible workspace file after "

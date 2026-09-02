@@ -32,6 +32,7 @@ READ_ONLY_WORKSPACE_TOOLS = frozenset(
     {
         WorkspaceToolName.LIST_FILES,
         WorkspaceToolName.SEARCH_CODE,
+        WorkspaceToolName.FIND_SYMBOL,
         WorkspaceToolName.READ_FILE,
         WorkspaceToolName.RUN_CHECK,
     },

@@ -291,8 +291,8 @@ class TestEvalHarness:
         assert len(architect_development.cases) == 24
         assert len(architect_holdout.cases) == 5
         assert development.dataset_version == "2026-08-20.5"
-        assert backend_development.dataset_version == "2026-08-25.1"
-        assert frontend_development.dataset_version == "2026-08-25.1"
+        assert backend_development.dataset_version == "2026-09-02.1"
+        assert frontend_development.dataset_version == "2026-09-02.1"
         assert architect_development.dataset_version == "2026-08-24.1"
         assert architect_holdout.dataset_version == "2026-08-24.0"
         assert development.dataset_hash
@@ -364,14 +364,22 @@ class TestEvalHarness:
         assert _case_from_suite(frontend, "fd-dev-002").task_scope_id == 1
         assert _tool_names(_case_from_suite(backend, "bd-dev-002")) >= {
             "apply_patch",
+            "find_symbol",
             "run_check",
             "search_code",
         }
         assert _tool_names(_case_from_suite(frontend, "fd-dev-002")) >= {
             "apply_patch",
+            "find_symbol",
             "run_check",
             "search_code",
         }
+        backend_reuse = _case_from_suite(backend, "bd-dev-003")
+        frontend_reuse = _case_from_suite(frontend, "fd-dev-003")
+        assert "find_symbol" in _tool_names(backend_reuse)
+        assert "find_symbol" in _tool_names(frontend_reuse)
+        assert "apply_patch" in backend_reuse.forbidden_tool_calls
+        assert "apply_patch" in frontend_reuse.forbidden_tool_calls
         assert _expected_status_update(
             _case_from_suite(backend, "bd-dev-004"),
         ) == {
@@ -388,6 +396,90 @@ class TestEvalHarness:
             "assigned_role": "frontend_developer",
             "status": "completed",
         }
+
+    @pytest.mark.parametrize(
+        ("suite_id", "dataset_path", "case_id", "role", "source_path"),
+        [
+            (
+                "backend_developer_development",
+                Path("evals/datasets/backend_developer_development.jsonl"),
+                "bd-dev-003",
+                DevelopmentRole.BACKEND_DEVELOPER,
+                "backend/password_reset.py",
+            ),
+            (
+                "frontend_developer_development",
+                Path("evals/datasets/frontend_developer_development.jsonl"),
+                "fd-dev-003",
+                DevelopmentRole.FRONTEND_DEVELOPER,
+                "frontend/utils/formatCurrency.ts",
+            ),
+        ],
+    )
+    def test_developer_reuse_cases_reject_duplicate_implementation(
+        self,
+        suite_id: str,
+        dataset_path: Path,
+        case_id: str,
+        role: DevelopmentRole,
+        source_path: str,
+    ) -> None:
+        """Accept exact discovery and hard-fail a duplicate code mutation."""
+        suite = JsonlGoldenDatasetLoader().load(suite_id, dataset_path)
+        case = _case_from_suite(suite, case_id)
+        discovery_calls = (
+            ObservedToolCall(
+                name="search_code",
+                arguments={},
+                status="completed",
+            ),
+            ObservedToolCall(
+                name="find_symbol",
+                arguments={},
+                status="completed",
+            ),
+            ObservedToolCall(
+                name="read_file",
+                arguments={"path": source_path},
+                status="completed",
+            ),
+        )
+        candidate = CandidateRunResult(
+            role=role,
+            model="qwen3.5:9b",
+            final_response=f"Reuse the existing code in {source_path}.",
+            tool_calls=discovery_calls,
+            database_effects=(),
+        )
+
+        accepted = DeterministicEvalGrader().grade(
+            case,
+            candidate,
+            "qwen3.5:9b",
+        )
+        duplicate = DeterministicEvalGrader().grade(
+            case,
+            replace(
+                candidate,
+                tool_calls=(
+                    *discovery_calls,
+                    ObservedToolCall(
+                        name="apply_patch",
+                        arguments={"path": source_path},
+                        status="completed",
+                    ),
+                ),
+            ),
+            "qwen3.5:9b",
+        )
+
+        assert accepted.passed is True
+        assert duplicate.passed is False
+        assert duplicate.hard_gate_failed is True
+        assert any(
+            "forbidden tool call attempted apply_patch" in reason
+            for reason in duplicate.reasons
+        )
 
     def test_development_dataset_declares_eval_intent_and_context(
         self,

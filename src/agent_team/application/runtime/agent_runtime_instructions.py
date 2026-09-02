@@ -89,9 +89,9 @@ def build_runtime_instructions(
         ),
         (
             "Before adding a class, function, method, endpoint, model, "
-            "repository, service, utility, or component, search for the "
-            "proposed symbol name and related existing behavior, then read "
-            "plausible matches."
+            "repository, service, utility, or component, call find_symbol "
+            "for every proposed symbol, search for related existing "
+            "behavior, then read plausible source files and nearby tests."
         ),
         (
             "Reuse or extend existing code where appropriate. If new code is "

@@ -9,6 +9,7 @@ allowed-tools:
   - update_task_status
   - list_files
   - search_code
+  - find_symbol
   - read_file
   - apply_patch
   - run_check
@@ -20,10 +21,11 @@ Follow this procedure for backend implementation tasks:
 2. Read the assigned task, requirements, acceptance criteria, architecture, and
    implementation-plan artifacts before editing.
 3. List the workspace structure to identify backend and shared areas.
-4. Search for proposed class, function, method, endpoint, model, repository,
-   service, or utility names before creating them.
+4. Call `find_symbol` for every proposed class, function, method, endpoint,
+   model, repository, service, or utility before creating it.
 5. Search for related existing behavior even when names differ.
-6. Read plausible matches and decide whether to reuse, extend, or create.
+6. Read plausible source matches and nearby tests, then decide whether to
+   reuse, extend, or create.
 7. Apply the smallest coherent patch only in authorized backend or shared
    paths.
 8. Prefer `run_check(name="backend")` after editing; use individual `ruff`,
