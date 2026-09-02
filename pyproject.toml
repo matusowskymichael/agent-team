@@ -22,6 +22,7 @@ agent-team-workflow-mcp = "agent_team.infrastructure.mcp.server.workflow_mcp_ent
 
 [dependency-groups]
 dev = [
+    "allure-pytest==2.16.0",
     "pyright>=1.1.411",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",

@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.reporting.allure_steps import fixture_title
+
 
 @pytest.fixture
+@fixture_title("Open managed SQLite test connections")
 def sqlite_connection() -> Iterator[Callable[[Path], sqlite3.Connection]]:
     """Create SQLite connections and close them after each test."""
     connections: list[sqlite3.Connection] = []

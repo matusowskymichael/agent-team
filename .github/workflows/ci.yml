@@ -17,10 +17,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
-    name: CI checks
+  test-and-report:
+    name: Test and build Allure report
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: read
 
     steps:
       - name: Check out repository
@@ -40,17 +42,219 @@ jobs:
           enable-cache: "true"
           cache-dependency-glob: "uv.lock"
 
-      - name: Sync locked dependencies
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Sync locked Python dependencies
         run: uv sync --locked --all-groups
 
+      - name: Install locked Allure Report 3 CLI
+        run: npm ci
+
       - name: Check formatting
+        id: format
+        continue-on-error: true
         run: uv run ruff format --check .
 
       - name: Lint
+        id: lint
+        if: always()
+        continue-on-error: true
         run: uv run ruff check .
 
       - name: Type check
+        id: typecheck
+        if: always()
+        continue-on-error: true
         run: uv run pyright
 
-      - name: Test without live Ollama
-        run: uv run pytest -m "not ollama and not ollama_eval"
+      - name: Test without live Ollama and collect Allure results
+        id: pytest
+        if: always()
+        continue-on-error: true
+        run: >-
+          uv run pytest
+          -m "not ollama and not ollama_eval"
+          --alluredir=allure-results
+          --clean-alluredir
+
+      - name: Refresh safe Allure run metadata
+        id: metadata
+        if: always()
+        continue-on-error: true
+        run: >-
+          uv run python -m tests.reporting.allure_report_metadata
+          --results-dir allure-results
+          --selection "not ollama and not ollama_eval"
+
+      - name: Generate Allure 3 HTML report
+        id: report
+        if: always()
+        continue-on-error: true
+        run: >-
+          npx --no-install allure generate allure-results
+          --output allure-report
+
+      - name: Generate agent-readable Allure report
+        id: agent
+        if: always()
+        continue-on-error: true
+        run: >-
+          npx --no-install allure agent inspect allure-results
+          --output allure-agent-report
+
+      - name: Apply Allure quality gate
+        id: quality
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p allure-agent-report
+          set -o pipefail
+          npx --no-install allure quality-gate allure-results 2>&1 \
+            | tee allure-agent-report/quality-gate.txt
+
+      - name: Write GitHub test summary
+        id: summary
+        if: always()
+        continue-on-error: true
+        run: >-
+          uv run python -m tests.reporting.allure_ci_summary
+          --results-dir allure-results
+          --output "$GITHUB_STEP_SUMMARY"
+          --pytest-status "${{ steps.pytest.outcome }}"
+          --report-status "${{ steps.report.outcome }}"
+          --agent-status "${{ steps.agent.outcome }}"
+          --quality-gate-status "${{ steps.quality.outcome }}"
+
+      - name: Upload raw Allure results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: allure-results
+          path: allure-results
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Allure HTML report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: allure-report
+          path: allure-report
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload agent-readable Allure report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: allure-agent-report
+          path: allure-agent-report
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Enforce checks and reporting
+        if: always()
+        shell: bash
+        env:
+          FORMAT_STATUS: "${{ steps.format.outcome }}"
+          LINT_STATUS: "${{ steps.lint.outcome }}"
+          TYPECHECK_STATUS: "${{ steps.typecheck.outcome }}"
+          PYTEST_STATUS: "${{ steps.pytest.outcome }}"
+          METADATA_STATUS: "${{ steps.metadata.outcome }}"
+          REPORT_STATUS: "${{ steps.report.outcome }}"
+          AGENT_STATUS: "${{ steps.agent.outcome }}"
+          QUALITY_STATUS: "${{ steps.quality.outcome }}"
+          SUMMARY_STATUS: "${{ steps.summary.outcome }}"
+        run: |
+          status=0
+          for result in \
+            "$FORMAT_STATUS" \
+            "$LINT_STATUS" \
+            "$TYPECHECK_STATUS" \
+            "$PYTEST_STATUS" \
+            "$METADATA_STATUS" \
+            "$REPORT_STATUS" \
+            "$AGENT_STATUS" \
+            "$QUALITY_STATUS" \
+            "$SUMMARY_STATUS"
+          do
+            if [ "$result" != "success" ]; then
+              status=1
+            fi
+          done
+          exit "$status"
+
+  pull-request-report:
+    name: Publish Allure pull-request summary
+    needs: test-and-report
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+
+    steps:
+      - name: Download generated Allure report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: allure-report
+          path: allure-report
+
+      - name: Publish official Allure summary and check
+        uses: allure-framework/allure-action@6e955eb19eef06cf8243a2d09f119a064e41df80 # v0.9.0
+        with:
+          report-directory: allure-report
+          github-token: "${{ github.token }}"
+          sections: |
+            new
+            flaky
+
+  deploy-pages:
+    name: Deploy latest main Allure report
+    needs: test-and-report
+    if: >-
+      ${{
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        needs.test-and-report.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: "${{ steps.deployment.outputs.page_url }}"
+
+    steps:
+      - name: Download generated Allure report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: allure-report
+          path: allure-report
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: allure-report
+
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
