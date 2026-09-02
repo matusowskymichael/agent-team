@@ -22,6 +22,7 @@ from agent_team.domain.workspace.code_search_result import CodeSearchResult
 from agent_team.domain.workspace.patch_application_result import (
     PatchApplicationResult,
 )
+from agent_team.domain.workspace.symbol_search_result import SymbolSearchResult
 from agent_team.domain.workspace.workspace_access_denied_error import (
     WorkspaceAccessDeniedError,
 )
@@ -75,12 +76,55 @@ class TestWorkspaceToolFactory:
 
         assert _tool_names(backend_tools) == {
             "apply_patch",
+            "find_symbol",
             "list_files",
             "read_file",
             "run_check",
             "search_code",
         }
         assert analyst_tools == []
+
+    def test_find_symbol_exposes_typed_read_only_results(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Expose current symbol definitions without source bodies in audit."""
+        _write(
+            tmp_path,
+            "backend/auth.py",
+            (
+                "class AuthService:\n"
+                "    def logout(self) -> None:\n"
+                "        pass\n"
+            ),
+        )
+        repository = _repository_with_task(DevelopmentRole.BACKEND_DEVELOPER)
+        audit_repository = FakeAgentAuditRepository()
+        tool = _tool(
+            "find_symbol",
+            repository,
+            audit_repository,
+            DevelopmentRole.BACKEND_DEVELOPER,
+            tmp_path,
+        )
+
+        result = _invoke(tool, '{"name":"AuthService.logout"}')
+
+        assert result["definitions"] == [
+            {
+                "path": "backend/auth.py",
+                "line_number": 2,
+                "name": "logout",
+                "qualified_name": "AuthService.logout",
+                "kind": "method",
+            },
+        ]
+        assert tool.params_json_schema["required"] == ["name"]
+        invocation = audit_repository.tool_invocations[1]
+        assert invocation.classification.value == "read_only"
+        assert "AuthService.logout" not in invocation.arguments_preview_json
+        assert "AuthService.logout" not in (invocation.result_preview or "")
+        assert "name_hash" in (invocation.result_preview or "")
 
     def test_read_file_audits_hashes(self, tmp_path: Path) -> None:
         """Audit read metadata without retaining complete source content."""
@@ -504,6 +548,9 @@ class _ExplodingWorkspaceExecutor:
 
     def search_code(self, query: str) -> CodeSearchResult:
         raise RuntimeError(f"boom {query}")
+
+    def find_symbol(self, name: str) -> SymbolSearchResult:
+        raise RuntimeError(f"boom {name}")
 
     def read_file(self, path: str) -> WorkspaceFileContent:
         raise RuntimeError(f"boom {path}")

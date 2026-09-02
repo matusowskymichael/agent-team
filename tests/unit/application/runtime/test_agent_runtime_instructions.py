@@ -172,6 +172,7 @@ class TestAgentRuntimeInstructions:
         }
         assert _line_values(instructions, "Available workspace tools:") == {
             "apply_patch",
+            "find_symbol",
             "list_files",
             "read_file",
             "run_check",
@@ -194,7 +195,8 @@ class TestAgentRuntimeInstructions:
             instructions
         )
         assert "Trusted assigned task ID for this run: 3." in instructions
-        assert "search for the proposed symbol name" in instructions
+        assert "call find_symbol for every proposed symbol" in instructions
+        assert "nearby tests" in instructions
 
     def test_frontend_developer_profile_has_workspace_tools(self) -> None:
         """Assign frontend workspace tools, checks, prefixes, and skill."""
@@ -222,6 +224,8 @@ class TestAgentRuntimeInstructions:
         }
         assert 'run_check(name="frontend")' in instructions
         assert "Use individual ruff or pytest checks only" in instructions
+        assert "call find_symbol for every proposed" in instructions
+        assert "nearby tests" in instructions
 
     @pytest.mark.parametrize(
         "role",

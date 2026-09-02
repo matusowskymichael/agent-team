@@ -7,6 +7,7 @@ from agent_team.domain.workspace.code_search_result import CodeSearchResult
 from agent_team.domain.workspace.patch_application_result import (
     PatchApplicationResult,
 )
+from agent_team.domain.workspace.symbol_search_result import SymbolSearchResult
 from agent_team.domain.workspace.workspace_file_content import (
     WorkspaceFileContent,
 )
@@ -24,6 +25,10 @@ class WorkspaceExecutor(Protocol):
 
     def search_code(self, query: str) -> CodeSearchResult:
         """Search visible workspace files for a literal query."""
+        ...
+
+    def find_symbol(self, name: str) -> SymbolSearchResult:
+        """Locate exact class, function, or method definitions."""
         ...
 
     def read_file(self, path: str) -> WorkspaceFileContent:

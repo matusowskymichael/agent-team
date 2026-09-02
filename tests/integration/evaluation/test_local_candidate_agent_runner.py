@@ -41,6 +41,7 @@ from agent_team.domain.evaluation.eval_verdict import EvalVerdict
 from agent_team.domain.evaluation.eval_workspace_file_fixture import (
     EvalWorkspaceFileFixture,
 )
+from agent_team.domain.evaluation.expected_tool_call import ExpectedToolCall
 from agent_team.domain.evaluation.rubric import Rubric
 from agent_team.domain.evaluation.rubric_dimension import RubricDimension
 from agent_team.domain.runtime.agent_result import AgentResult
@@ -243,6 +244,54 @@ class _AuditOnlyOrchestrator:
             output_excerpt="No workflow changes.",
         )
         return AgentResult(response="No workflow changes.")
+
+
+class _SymbolAuditOrchestrator:
+    def __init__(
+        self,
+        audit_repository: (audit_repository_module.SQLiteAgentAuditRepository),
+        symbol_name: str,
+    ) -> None:
+        self.audit_repository = audit_repository
+        self.symbol_name = symbol_name
+
+    async def run(self, task: AgentTask) -> AgentResult:
+        run = self.audit_repository.start_run(
+            AgentRunStart(
+                role=task.role,
+                model="qwen3.5:9b",
+                prompt_hash="hash",
+                prompt_excerpt=task.prompt,
+                max_turns=6,
+                session_id=task.session_id,
+                feature_id=task.feature_id,
+            ),
+        )
+        arguments_hash, arguments_preview = sanitize_tool_arguments(
+            "find_symbol",
+            {"name": self.symbol_name},
+        )
+        invocation = self.audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=run.id,
+                server_name="developer_workspace",
+                tool_name="find_symbol",
+                classification=ToolClassification.READ_ONLY,
+                arguments_hash=arguments_hash,
+                arguments_preview_json=arguments_preview,
+            ),
+        )
+        self.audit_repository.complete_tool_invocation(
+            invocation_id=invocation.id,
+            result_hash="result-hash",
+            result_preview='{"definitions":[]}',
+        )
+        self.audit_repository.complete_run(
+            run_id=run.id,
+            output_hash="output-hash",
+            output_excerpt="Inspected the symbol.",
+        )
+        return AgentResult(response="Inspected the symbol.")
 
 
 class _SkillAuditOrchestrator:
@@ -689,6 +738,78 @@ class TestLocalCandidateAgentRunner:
             effect.field_values["assigned_role"]
             for effect in result.database_effects
         } == {role.value for role in _task_roles()}
+
+    def test_find_symbol_observation_restores_exact_golden_argument(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Match a hashed audit argument to its golden-declared symbol name."""
+        symbol_name = "PasswordResetService.generate_token"
+        observed_names = iter((symbol_name, "UnrelatedSymbol"))
+        eval_case = replace(
+            _case(),
+            id="symbol-observation",
+            active_role=DevelopmentRole.BACKEND_DEVELOPER,
+            expected_tool_calls=(
+                ExpectedToolCall(
+                    name="find_symbol",
+                    arguments_subset={"name": symbol_name},
+                ),
+            ),
+        )
+
+        def orchestrator(
+            database_path: Path,
+            workflow_repository: (
+                workflow_repository_module.SQLiteWorkflowRepository
+            ),
+            audit_repository: (
+                audit_repository_module.SQLiteAgentAuditRepository
+            ),
+            case: EvalCase,
+            settings: OllamaSettings,
+        ) -> _SymbolAuditOrchestrator:
+            assert database_path.name == "workflow.db"
+            assert workflow_repository is not None
+            assert case.id == eval_case.id
+            assert settings.model == "qwen3.5:9b"
+            return _SymbolAuditOrchestrator(
+                audit_repository,
+                next(observed_names),
+            )
+
+        monkeypatch.setattr(
+            local_candidate_agent_runner,
+            "_orchestrator",
+            orchestrator,
+        )
+
+        result = asyncio.run(_async_run(eval_case))
+        unrelated = asyncio.run(_async_run(eval_case))
+
+        assert result.tool_calls[0].arguments["name"] == symbol_name
+        assert "name_hash" in result.tool_calls[0].arguments
+        assert (
+            DeterministicEvalGrader()
+            .grade(
+                eval_case,
+                result,
+                "qwen3.5:9b",
+            )
+            .passed
+            is True
+        )
+        assert "name" not in unrelated.tool_calls[0].arguments
+        assert (
+            DeterministicEvalGrader()
+            .grade(
+                eval_case,
+                unrelated,
+                "qwen3.5:9b",
+            )
+            .passed
+            is False
+        )
 
     def test_retry_uses_fresh_database_with_seeded_fixtures(
         self,

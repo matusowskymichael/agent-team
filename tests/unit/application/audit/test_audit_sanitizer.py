@@ -75,6 +75,20 @@ class TestAuditSanitizer:
         assert "description_hash" in parsed
         assert "Implement sensitive backend details" not in preview
 
+    def test_symbol_names_are_hashed_in_audit_previews(self) -> None:
+        """Avoid retaining repository symbol names in audit previews."""
+        _hash, preview = sanitize_tool_arguments(
+            "find_symbol",
+            {"name": "PrivateBillingService.rotate_credential"},
+        )
+
+        parsed = json.loads(preview)
+        assert "PrivateBillingService" not in preview
+        assert parsed["name_length"] == len(
+            "PrivateBillingService.rotate_credential",
+        )
+        assert len(parsed["name_hash"]) == 64
+
     @pytest.mark.parametrize(
         "role",
         [

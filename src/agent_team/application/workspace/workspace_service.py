@@ -11,6 +11,7 @@ from agent_team.domain.workspace.code_search_result import CodeSearchResult
 from agent_team.domain.workspace.patch_application_result import (
     PatchApplicationResult,
 )
+from agent_team.domain.workspace.symbol_search_result import SymbolSearchResult
 from agent_team.domain.workspace.workspace_access_denied_error import (
     WorkspaceAccessDeniedError,
 )
@@ -78,6 +79,24 @@ class WorkspaceService:
         if not query.strip():
             raise WorkspaceAccessDeniedError("Search query must not be blank.")
         return self.executor.search_code(query)
+
+    def find_symbol(
+        self,
+        profile: AgentProfile,
+        task: AgentTask,
+        name: str,
+    ) -> SymbolSearchResult:
+        """Locate exact source definitions after binding checks."""
+        self._authorize(
+            profile,
+            task,
+            WorkspaceToolName.FIND_SYMBOL,
+            "",
+            mutation=False,
+        )
+        if not name.strip():
+            raise WorkspaceAccessDeniedError("Symbol name must not be blank.")
+        return self.executor.find_symbol(name)
 
     def read_file(
         self,

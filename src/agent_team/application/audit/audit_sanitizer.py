@@ -136,6 +136,13 @@ def _sanitize_mapping(
             query = str(value)
             sanitized["query_hash"] = hash_text(query)
             sanitized["query_length"] = len(query)
+        elif tool_name == "find_symbol" and key in {
+            "name",
+            "qualified_name",
+        }:
+            name = str(value)
+            sanitized[f"{key}_hash"] = hash_text(name)
+            sanitized[f"{key}_length"] = len(name)
         elif tool_name == "create_task" and key == "description":
             description = str(value)
             sanitized["description_hash"] = hash_text(description)

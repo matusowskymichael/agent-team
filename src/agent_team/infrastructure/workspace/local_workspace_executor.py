@@ -1,7 +1,9 @@
 """Restricted local workspace executor."""
 
+import ast
 import fnmatch
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterable, Mapping
@@ -18,6 +20,8 @@ from agent_team.domain.workspace.code_search_result import CodeSearchResult
 from agent_team.domain.workspace.patch_application_result import (
     PatchApplicationResult,
 )
+from agent_team.domain.workspace.symbol_definition import SymbolDefinition
+from agent_team.domain.workspace.symbol_search_result import SymbolSearchResult
 from agent_team.domain.workspace.workspace_access_denied_error import (
     WorkspaceAccessDeniedError,
 )
@@ -30,6 +34,7 @@ from agent_team.domain.workspace.workspace_file_listing import (
 
 MAX_LIST_FILES = 250
 MAX_SEARCH_MATCHES = 80
+MAX_SYMBOL_DEFINITIONS = 80
 MAX_READ_CHARS = 20_000
 MAX_CHECK_OUTPUT_CHARS = 4_000
 CHECK_TIMEOUT_SECONDS = 60.0
@@ -91,6 +96,29 @@ DESTRUCTIVE_CHECK_TOKENS = frozenset(
         "scp",
     },
 )
+SYMBOL_SOURCE_SUFFIXES = frozenset(
+    {".cjs", ".js", ".jsx", ".mjs", ".py", ".pyi", ".ts", ".tsx"},
+)
+JAVASCRIPT_CLASS_PATTERN = re.compile(
+    r"^\s*(?:export\s+(?:default\s+)?)?class\s+"
+    r"([A-Za-z_$][\w$]*)",
+)
+JAVASCRIPT_FUNCTION_PATTERN = re.compile(
+    r"^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+"
+    r"([A-Za-z_$][\w$]*)",
+)
+JAVASCRIPT_ASSIGNED_FUNCTION_PATTERN = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+"
+    r"([A-Za-z_$][\w$]*)(?:\s*:[^=]+)?\s*=\s*"
+    r"(?:(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|function\b)",
+)
+JAVASCRIPT_METHOD_PATTERN = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|async|readonly|abstract|get|set)"
+    r"\s+)*([A-Za-z_$][\w$]*)\s*\(",
+)
+JAVASCRIPT_NON_METHOD_NAMES = frozenset(
+    {"catch", "constructor", "for", "if", "switch", "while"},
+)
 
 
 def _default_check_commands() -> dict[str, tuple[str, ...]]:
@@ -148,6 +176,33 @@ class LocalWorkspaceExecutor:
             query_hash=hash_text(clean_query),
             matches=tuple(matches[:MAX_SEARCH_MATCHES]),
             truncated=len(matches) > MAX_SEARCH_MATCHES,
+        )
+
+    def find_symbol(self, name: str) -> SymbolSearchResult:
+        """Locate exact source definitions from current workspace contents."""
+        clean_name = name.strip()
+        if not clean_name:
+            raise WorkspaceAccessDeniedError("Symbol name must not be blank.")
+        definitions = sorted(
+            (
+                definition
+                for path in self._visible_source_files()
+                for definition in _source_definitions(
+                    _relative_path(self._root(), path),
+                    path.read_text(encoding="utf-8"),
+                )
+                if _symbol_matches(definition, clean_name)
+            ),
+            key=lambda definition: (
+                definition.path,
+                definition.line_number,
+                definition.qualified_name,
+            ),
+        )
+        return SymbolSearchResult(
+            query_hash=hash_text(clean_name),
+            definitions=tuple(definitions[:MAX_SYMBOL_DEFINITIONS]),
+            truncated=len(definitions) > MAX_SYMBOL_DEFINITIONS,
         )
 
     def read_file(self, path: str) -> WorkspaceFileContent:
@@ -315,6 +370,19 @@ class LocalWorkspaceExecutor:
                     )
         return matches
 
+    def _visible_source_files(self) -> Iterable[Path]:
+        root = self._root()
+        for candidate in _walk_files(root):
+            if candidate.suffix.lower() not in SYMBOL_SOURCE_SUFFIXES:
+                continue
+            try:
+                relative = candidate.relative_to(root).as_posix()
+                path = self._resolve_file(relative, must_exist=True)
+                path.read_text(encoding="utf-8")
+            except UnicodeDecodeError, WorkspaceAccessDeniedError:
+                continue
+            yield path
+
     def _resolve_directory(self, path: str) -> Path:
         resolved = self._resolve(path)
         if not resolved.exists():
@@ -388,6 +456,129 @@ def _walk_files(start: Path) -> Iterable[Path]:
         current = Path(directory)
         for file_name in file_names:
             yield current / file_name
+
+
+def _source_definitions(
+    path: str,
+    content: str,
+) -> tuple[SymbolDefinition, ...]:
+    if Path(path).suffix.lower() in {".py", ".pyi"}:
+        return _python_definitions(path, content)
+    return _javascript_definitions(path, content)
+
+
+def _python_definitions(
+    path: str,
+    content: str,
+) -> tuple[SymbolDefinition, ...]:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return ()
+    return tuple(_python_node_definitions(path, tree.body))
+
+
+def _python_node_definitions(
+    path: str,
+    nodes: Iterable[ast.stmt],
+    containers: tuple[str, ...] = (),
+) -> Iterable[SymbolDefinition]:
+    for node in nodes:
+        if isinstance(node, ast.ClassDef):
+            qualified_name = ".".join((*containers, node.name))
+            yield SymbolDefinition(
+                path=path,
+                line_number=node.lineno,
+                name=node.name,
+                qualified_name=qualified_name,
+                kind="class",
+            )
+            yield from _python_node_definitions(
+                path,
+                node.body,
+                (*containers, node.name),
+            )
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            yield SymbolDefinition(
+                path=path,
+                line_number=node.lineno,
+                name=node.name,
+                qualified_name=".".join((*containers, node.name)),
+                kind="method" if containers else "function",
+            )
+
+
+def _javascript_definitions(
+    path: str,
+    content: str,
+) -> tuple[SymbolDefinition, ...]:
+    definitions: list[SymbolDefinition] = []
+    active_class: str | None = None
+    class_depth = 0
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        class_match = JAVASCRIPT_CLASS_PATTERN.match(line)
+        if class_match is not None:
+            class_name = class_match.group(1)
+            class_depth = _brace_delta(line)
+            definitions.append(
+                SymbolDefinition(
+                    path=path,
+                    line_number=line_number,
+                    name=class_name,
+                    qualified_name=class_name,
+                    kind="class",
+                ),
+            )
+            active_class = class_name
+            if class_depth <= 0:
+                active_class = None
+            continue
+
+        if active_class is not None:
+            method_match = JAVASCRIPT_METHOD_PATTERN.match(line)
+            if (
+                class_depth == 1
+                and method_match is not None
+                and method_match.group(1) not in JAVASCRIPT_NON_METHOD_NAMES
+            ):
+                method_name = method_match.group(1)
+                definitions.append(
+                    SymbolDefinition(
+                        path=path,
+                        line_number=line_number,
+                        name=method_name,
+                        qualified_name=f"{active_class}.{method_name}",
+                        kind="method",
+                    ),
+                )
+            class_depth += _brace_delta(line)
+            if class_depth <= 0:
+                active_class = None
+            continue
+
+        function_match = JAVASCRIPT_FUNCTION_PATTERN.match(line)
+        if function_match is None:
+            function_match = JAVASCRIPT_ASSIGNED_FUNCTION_PATTERN.match(line)
+        if function_match is not None:
+            function_name = function_match.group(1)
+            definitions.append(
+                SymbolDefinition(
+                    path=path,
+                    line_number=line_number,
+                    name=function_name,
+                    qualified_name=function_name,
+                    kind="function",
+                ),
+            )
+    return tuple(definitions)
+
+
+def _symbol_matches(definition: SymbolDefinition, name: str) -> bool:
+    return name in {definition.name, definition.qualified_name}
+
+
+def _brace_delta(line: str) -> int:
+    return line.count("{") - line.count("}")
 
 
 def _relative_path(root: Path, path: Path) -> str:

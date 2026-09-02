@@ -21,6 +21,7 @@ from agent_team.domain.workspace.code_search_result import CodeSearchResult
 from agent_team.domain.workspace.patch_application_result import (
     PatchApplicationResult,
 )
+from agent_team.domain.workspace.symbol_search_result import SymbolSearchResult
 from agent_team.domain.workspace.workspace_access_denied_error import (
     WorkspaceAccessDeniedError,
 )
@@ -56,6 +57,13 @@ class _FakeWorkspaceExecutor:
 
     def search_code(self, query: str) -> CodeSearchResult:
         return CodeSearchResult(query_hash=query, matches=(), truncated=False)
+
+    def find_symbol(self, name: str) -> SymbolSearchResult:
+        return SymbolSearchResult(
+            query_hash=name,
+            definitions=(),
+            truncated=False,
+        )
 
     def read_file(self, path: str) -> WorkspaceFileContent:
         return WorkspaceFileContent(
@@ -128,11 +136,13 @@ class TestWorkspaceService:
 
         listing = service.list_files(profile, task, "backend")
         search = service.search_code(profile, task, "AuthService")
+        symbols = service.find_symbol(profile, task, "AuthService.logout")
         content = service.read_file(profile, task, "backend/auth.py")
         check = service.run_check(profile, task, "backend")
 
         assert listing.files == ("backend",)
         assert search.query_hash == "AuthService"
+        assert symbols.query_hash == "AuthService.logout"
         assert content.path == "backend/auth.py"
         assert check.name == "backend"
         assert executor.check_calls == ["backend"]
@@ -397,6 +407,22 @@ class TestWorkspaceService:
 
         with pytest.raises(WorkspaceAccessDeniedError, match="must not"):
             service.search_code(
+                profile,
+                _task(DevelopmentRole.BACKEND_DEVELOPER),
+                "   ",
+            )
+
+    def test_blank_symbol_name_is_denied_before_executor(self) -> None:
+        """Reject blank symbol names in application validation."""
+        repository = _repository_with_task(DevelopmentRole.BACKEND_DEVELOPER)
+        executor = _FakeWorkspaceExecutor()
+        service = WorkspaceService(repository=repository, executor=executor)
+        profile = AgentProfileCatalog().get_profile(
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+
+        with pytest.raises(WorkspaceAccessDeniedError, match="must not"):
+            service.find_symbol(
                 profile,
                 _task(DevelopmentRole.BACKEND_DEVELOPER),
                 "   ",
