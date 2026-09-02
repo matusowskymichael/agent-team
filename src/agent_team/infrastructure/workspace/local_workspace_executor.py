@@ -537,7 +537,8 @@ def _javascript_definitions(
         if active_class is not None:
             method_match = JAVASCRIPT_METHOD_PATTERN.match(line)
             if (
-                method_match is not None
+                class_depth == 1
+                and method_match is not None
                 and method_match.group(1) not in JAVASCRIPT_NON_METHOD_NAMES
             ):
                 method_name = method_match.group(1)

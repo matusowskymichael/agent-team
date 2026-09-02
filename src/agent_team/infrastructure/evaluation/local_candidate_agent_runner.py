@@ -175,7 +175,7 @@ class LocalCandidateAgentRunner:
                 error_stage = None
 
             effects = _database_effects(workflow_repository, baseline)
-            tool_calls = _tool_calls(audit_repository, effects)
+            tool_calls = _tool_calls(audit_repository, effects, case)
             skill_calls = _skill_calls(audit_repository)
             return CandidateRunResult(
                 role=case.active_role,
@@ -422,6 +422,7 @@ def _snapshot(
 def _tool_calls(
     audit_repository: SQLiteAgentAuditRepository,
     effects: tuple[DatabaseEffect, ...],
+    case: EvalCase,
 ) -> tuple[ObservedToolCall, ...]:
     runs = audit_repository.list_runs(limit=1)
     if not runs:
@@ -438,6 +439,11 @@ def _tool_calls(
         if invocation.server_name == SKILL_SERVER_NAME:
             continue
         arguments = _json_object(invocation.arguments_preview_json)
+        arguments = _restore_expected_symbol_name(
+            case,
+            invocation.tool_name,
+            arguments,
+        )
         if invocation.tool_name == "add_artifact":
             arguments, artifact_index = _artifact_arguments(
                 arguments,
@@ -453,6 +459,35 @@ def _tool_calls(
             )
         )
     return tuple(tool_calls)
+
+
+def _restore_expected_symbol_name(
+    case: EvalCase,
+    tool_name: str,
+    arguments: dict[str, object],
+) -> dict[str, object]:
+    """Restore a golden symbol name only when its audit hash matches."""
+    if tool_name != "find_symbol":
+        return arguments
+    observed_hash = arguments.get("name_hash")
+    if not isinstance(observed_hash, str):
+        return arguments
+    for expected_name in _expected_symbol_names(case):
+        if hash_text_value(expected_name) == observed_hash:
+            return {**arguments, "name": expected_name}
+    return arguments
+
+
+def _expected_symbol_names(case: EvalCase) -> tuple[str, ...]:
+    expected_calls = list(case.expected_tool_calls)
+    for trajectory in case.acceptable_tool_trajectories:
+        expected_calls.extend(trajectory.required_tool_calls)
+    return tuple(
+        name
+        for call in expected_calls
+        if call.name == "find_symbol"
+        and isinstance(name := call.arguments_subset.get("name"), str)
+    )
 
 
 def _skill_calls(

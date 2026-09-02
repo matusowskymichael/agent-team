@@ -291,8 +291,8 @@ class TestEvalHarness:
         assert len(architect_development.cases) == 24
         assert len(architect_holdout.cases) == 5
         assert development.dataset_version == "2026-08-20.5"
-        assert backend_development.dataset_version == "2026-09-02.1"
-        assert frontend_development.dataset_version == "2026-09-02.1"
+        assert backend_development.dataset_version == "2026-09-02.2"
+        assert frontend_development.dataset_version == "2026-09-02.2"
         assert architect_development.dataset_version == "2026-08-24.1"
         assert architect_holdout.dataset_version == "2026-08-24.0"
         assert development.dataset_hash
@@ -360,6 +360,22 @@ class TestEvalHarness:
         assert {case.rubric_id for case in frontend.cases} == {
             "frontend_developer_workflow",
         }
+        assert {
+            case.id: _find_symbol_name(case)
+            for case in (*backend.cases, *frontend.cases)
+            if "find_symbol" in _tool_names(case)
+        } == {
+            "bd-dev-001": "AuthService.login",
+            "bd-dev-002": "AuthService.logout",
+            "bd-dev-003": "PasswordResetService.generate_token",
+            "bd-dev-004": "AuditExportFormatter",
+            "bd-dev-008": "health",
+            "fd-dev-001": "LoginForm",
+            "fd-dev-002": "AccountMenu",
+            "fd-dev-003": "formatCurrency",
+            "fd-dev-004": "EmptyState",
+            "fd-dev-008": "StatusBadge",
+        }
         assert _case_from_suite(backend, "bd-dev-002").task_scope_id == 1
         assert _case_from_suite(frontend, "fd-dev-002").task_scope_id == 1
         assert _tool_names(_case_from_suite(backend, "bd-dev-002")) >= {
@@ -398,7 +414,13 @@ class TestEvalHarness:
         }
 
     @pytest.mark.parametrize(
-        ("suite_id", "dataset_path", "case_id", "role", "source_path"),
+        (
+            "suite_id",
+            "dataset_path",
+            "case_id",
+            "role",
+            "source_path",
+        ),
         [
             (
                 "backend_developer_development",
@@ -427,6 +449,7 @@ class TestEvalHarness:
         """Accept exact discovery and hard-fail a duplicate code mutation."""
         suite = JsonlGoldenDatasetLoader().load(suite_id, dataset_path)
         case = _case_from_suite(suite, case_id)
+        symbol_name = _find_symbol_name(case)
         discovery_calls = (
             ObservedToolCall(
                 name="search_code",
@@ -435,7 +458,7 @@ class TestEvalHarness:
             ),
             ObservedToolCall(
                 name="find_symbol",
-                arguments={},
+                arguments={"name": symbol_name},
                 status="completed",
             ),
             ObservedToolCall(
@@ -472,8 +495,26 @@ class TestEvalHarness:
             ),
             "qwen3.5:9b",
         )
+        unrelated_symbol = DeterministicEvalGrader().grade(
+            case,
+            replace(
+                candidate,
+                tool_calls=tuple(
+                    replace(call, arguments={"name": "UnrelatedSymbol"})
+                    if call.name == "find_symbol"
+                    else call
+                    for call in discovery_calls
+                ),
+            ),
+            "qwen3.5:9b",
+        )
 
         assert accepted.passed is True
+        assert unrelated_symbol.passed is False
+        assert any(
+            "missing expected tool call find_symbol" in reason
+            for reason in unrelated_symbol.reasons
+        )
         assert duplicate.passed is False
         assert duplicate.hard_gate_failed is True
         assert any(
@@ -3026,6 +3067,15 @@ def _case_from_suite(suite: EvalSuite, case_id: str) -> EvalCase:
 
 def _tool_names(case: EvalCase) -> set[str]:
     return {tool.name for tool in case.expected_tool_calls}
+
+
+def _find_symbol_name(case: EvalCase) -> str:
+    for tool in case.expected_tool_calls:
+        if tool.name == "find_symbol":
+            name = tool.arguments_subset.get("name")
+            if isinstance(name, str):
+                return name
+    raise AssertionError(f"Missing exact find_symbol name for {case.id}.")
 
 
 def _expected_status_update(case: EvalCase) -> dict[str, object]:
