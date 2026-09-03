@@ -1,0 +1,52 @@
+[
+  {
+    "name": "Capability or authorization denial",
+    "matchedStatuses": ["failed", "broken"],
+    "messageRegex": "(?:CAPABILITY_DENIED|CapabilityDeniedError|authorization denied)"
+  },
+  {
+    "name": "Unexpected workflow mutation",
+    "matchedStatuses": ["failed", "broken"],
+    "messageRegex": "(?:unexpected (?:database|workflow) (?:effect|mutation)|mutation hard gate)"
+  },
+  {
+    "name": "Cross-feature isolation failure",
+    "matchedStatuses": ["failed", "broken"],
+    "messageRegex": "(?:AgentSessionBindingError|cross-feature|bound feature)"
+  },
+  {
+    "name": "Deterministic evaluation failure",
+    "matchedStatuses": ["failed", "broken"],
+    "messageRegex": "(?:deterministic (?:evaluation|grade).*fail|hard gate failed)"
+  },
+  {
+    "name": "Incomplete model output",
+    "matchedStatuses": ["failed", "broken"],
+    "messageRegex": "(?:AgentOutputIncompleteError|incomplete (?:model )?output|finish_reason)"
+  },
+  {
+    "name": "Ollama or evaluation infrastructure unavailable",
+    "matchedStatuses": ["failed", "broken"],
+    "messageRegex": "(?:OllamaUnavailableError|WorkflowMCPUnavailableError|infrastructure_error)"
+  },
+  {
+    "name": "Timeout",
+    "matchedStatuses": ["failed", "broken"],
+    "messageRegex": "(?:TimeoutError|timed out|timeout)"
+  },
+  {
+    "name": "Fixture or setup failure",
+    "matchedStatuses": ["broken"],
+    "traceRegex": "(?:_pytest/fixtures\\.py|fixture.*setup)"
+  },
+  {
+    "name": "Assertion failure",
+    "matchedStatuses": ["failed"],
+    "traceRegex": "AssertionError"
+  },
+  {
+    "name": "Unexpected application exception",
+    "matchedStatuses": ["broken"],
+    "traceRegex": "agent_team/"
+  }
+]
