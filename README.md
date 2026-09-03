@@ -742,20 +742,28 @@ Resolved and installed the locked Python environment.
 added 235 packages, and audited 236 packages
 ```
 
-Collect fresh raw Allure results while excluding all live Ollama tests:
+Collect private raw Allure results while excluding all live Ollama tests, then
+create the sanitized result directory used by every report command:
 
 ```bash
-rm -rf allure-results allure-report allure-agent-report
+rm -rf \
+  allure-results-raw \
+  allure-results \
+  allure-report \
+  allure-agent-report
 uv run pytest \
   -m "not ollama and not ollama_eval" \
-  --alluredir=allure-results \
+  --alluredir=allure-results-raw \
   --clean-alluredir
+npm run allure:sanitize
 ```
 
 The normal coverage configuration and 90% gate still apply. The generated
-`allure-results/` directory contains pytest result files, safe environment
-metadata, CI executor metadata when applicable, and the maintained failure
-categories.
+`allure-results-raw/` directory is private, ephemeral input and must never be
+uploaded or used to build a shared report. The fail-closed sanitization step
+creates `allure-results/` with safe failure details, redacted textual
+attachments and parameters, environment metadata, CI executor metadata when
+applicable, and the maintained failure categories.
 
 Generate and open the human-readable Allure 3 report:
 
@@ -815,16 +823,25 @@ Then run:
 ```bash
 ALLURE_TESTPLAN_PATH=allure-testplan.json \
   uv run pytest \
-  --alluredir=allure-results \
+  --alluredir=allure-results-raw \
   --clean-alluredir
+npm run allure:sanitize
 ```
 
 In GitHub Actions, open a CI workflow run and use its **Artifacts** section to
 download:
 
-- `allure-results`: raw adapter results and safe run metadata;
+- `allure-results`: sanitized adapter results and safe run metadata;
 - `allure-report`: the generated HTML report;
 - `allure-agent-report`: Markdown and manifests for coding-agent inspection.
+
+Download and open a private HTML artifact from an authenticated GitHub CLI
+session by replacing `RUN_ID` with the workflow run ID shown by GitHub:
+
+```bash
+gh run download RUN_ID -n allure-report
+npx allure open allure-report
+```
 
 For same-repository pull requests, the separate read/report job uses the
 official Allure Action to publish a pull-request summary and check. Fork pull
@@ -832,20 +849,7 @@ requests do not receive write permissions; their test job and downloadable
 artifacts still run. The CI step summary also shows aggregate test counts,
 report generation state, and quality-gate state.
 
-After a successful push to `main`, the report deployment job is configured to
-publish the latest HTML report at:
-
-```text
-https://matusowskymichael.github.io/agent-team/
-```
-
-One repository setting may be required before the first deployment:
-
-```text
-GitHub repository -> Settings -> Pages -> Build and deployment ->
-Source: GitHub Actions
-```
-
-This simple Pages deployment publishes only the latest successful `main`
-report. It does not retain Allure trend history because the project has no
-persistent Allure storage service.
+Reports remain private GitHub Actions artifacts. GitHub Pages publication is
+intentionally disabled because this private repository does not have private
+Pages visibility. Artifact retention is finite and no persistent Allure
+history service is configured.

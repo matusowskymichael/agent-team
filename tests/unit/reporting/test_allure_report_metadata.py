@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from tests.reporting.allure_report_metadata import (
     environment_properties,
     write_allure_report_metadata,
@@ -39,8 +41,36 @@ class TestAllureReportMetadata:
         assert "git.branch=local" in properties
         assert "git.commit=unavailable" in properties
         assert "live.ollama.excluded=true" in properties
+        assert "live.ollama_eval.excluded=true" in properties
         assert "do-not-store" not in properties
         assert not (results_directory / "executor.json").exists()
+
+    @pytest.mark.parametrize(
+        ("marker_expression", "ollama_excluded", "eval_excluded"),
+        [
+            ("not ollama", True, False),
+            ("not ollama_eval", False, True),
+            ("not ollama and not ollama_eval", True, True),
+            ("not ollama or slow", False, False),
+        ],
+    )
+    def test_parses_live_marker_exclusions_exactly(
+        self,
+        marker_expression: str,
+        ollama_excluded: bool,
+        eval_excluded: bool,
+    ) -> None:
+        """Distinguish exact markers and conservatively handle alternatives."""
+        properties = environment_properties(marker_expression, {})
+
+        assert (
+            f"live.ollama.excluded={str(ollama_excluded).casefold()}"
+            in properties
+        )
+        assert (
+            f"live.ollama_eval.excluded={str(eval_excluded).casefold()}"
+            in properties
+        )
 
     def test_writes_valid_ci_executor_json(self, tmp_path: Path) -> None:
         """Create executor metadata from the approved GitHub value subset."""

@@ -1,6 +1,7 @@
 """Generate safe Allure environment, executor, and category metadata."""
 
 import argparse
+import ast
 import json
 import os
 import platform
@@ -61,6 +62,7 @@ def environment_properties(
 ) -> str:
     """Return escaped Allure environment properties from safe values only."""
     commit_sha = commit_sha_from(environment)
+    excluded_markers = _excluded_live_markers(test_selection)
     properties = {
         "python.version": platform.python_version(),
         "operating.system": platform.system(),
@@ -68,7 +70,10 @@ def environment_properties(
         "project.version": _project_version(),
         "test.selection": _safe_selection(test_selection),
         "live.ollama.excluded": str(
-            _live_ollama_excluded(test_selection),
+            "ollama" in excluded_markers,
+        ).casefold(),
+        "live.ollama_eval.excluded": str(
+            "ollama_eval" in excluded_markers,
         ).casefold(),
         "git.branch": branch_from(environment),
         "git.commit": commit_sha[:12] if commit_sha else "unavailable",
@@ -148,9 +153,72 @@ def _safe_selection(value: str) -> str:
     return sanitized[:160] or "all configured tests"
 
 
-def _live_ollama_excluded(value: str) -> bool:
-    normalized = " ".join(value.casefold().split())
-    return "not ollama" in normalized and "not ollama_eval" in normalized
+def _excluded_live_markers(value: str) -> frozenset[str]:
+    try:
+        expression = ast.parse(value.casefold(), mode="eval")
+    except SyntaxError:
+        return frozenset()
+    if not _supported_marker_expression(expression.body):
+        return frozenset()
+    return frozenset(
+        marker
+        for marker in ("ollama", "ollama_eval")
+        if True
+        not in _possible_expression_values(
+            expression.body,
+            selected_marker=marker,
+        )
+    )
+
+
+def _supported_marker_expression(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return _supported_marker_expression(node.operand)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And | ast.Or):
+        return all(
+            _supported_marker_expression(value) for value in node.values
+        )
+    return False
+
+
+def _possible_expression_values(
+    node: ast.expr,
+    *,
+    selected_marker: str,
+) -> frozenset[bool]:
+    if isinstance(node, ast.Name):
+        if node.id == selected_marker:
+            return frozenset({True})
+        return frozenset({False, True})
+    if isinstance(node, ast.UnaryOp):
+        return frozenset(
+            not value
+            for value in _possible_expression_values(
+                node.operand,
+                selected_marker=selected_marker,
+            )
+        )
+    assert isinstance(node, ast.BoolOp)
+    possible = _possible_expression_values(
+        node.values[0],
+        selected_marker=selected_marker,
+    )
+    for child in node.values[1:]:
+        child_values = _possible_expression_values(
+            child,
+            selected_marker=selected_marker,
+        )
+        if isinstance(node.op, ast.And):
+            possible = frozenset(
+                left and right for left in possible for right in child_values
+            )
+        else:
+            possible = frozenset(
+                left or right for left in possible for right in child_values
+            )
+    return possible
 
 
 def _escape_property(value: object) -> str:

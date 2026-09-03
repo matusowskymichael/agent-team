@@ -8,6 +8,7 @@ from tests.reporting.allure_test_policy import (
     readable_title,
     safe_node_id,
     safe_parameter_value,
+    safe_reported_parameter_value,
     severity_for,
     stable_test_id,
     suite_hierarchy,
@@ -47,14 +48,20 @@ class TestAllureTestPolicy:
         )
 
         reporting_node_id = (
-            "tests/integration/reporting/test_allure_pytest_plugin.py::"
-            "TestAllurePytestPlugin::test_plain_run"
+            "tests/unit/reporting/test_allure_ci_context.py::"
+            "TestAllureCIContext::test_context_link"
         )
         assert suite_hierarchy(reporting_node_id) == (
-            "Integration",
+            "Unit",
             "Reporting",
-            "Allure Pytest Plugin",
+            "Allure CI Context",
         )
+
+        runtime_collision = (
+            "tests/unit/application/runtime/test_context_reporting.py::"
+            "TestReportingContext::test_audit_context"
+        )
+        assert suite_hierarchy(runtime_collision)[1] == "Runtime"
 
     def test_maps_integration_markers_to_focused_tags(self) -> None:
         """Include layer, subsystem, live-model, and evaluation tags."""
@@ -114,8 +121,93 @@ class TestAllureTestPolicy:
         assert title == "Role Behavior [role=business_analyst]"
         assert safe_parameter_value("prompt", "private") == "<redacted>"
 
+    def test_redacts_unknown_and_payload_parameters(self) -> None:
+        """Deny parameter display unless its name and value are allowlisted."""
+        private_value = "unique-private-parameter"
+
+        for name in (
+            "arguments",
+            "arguments_json",
+            "content",
+            "description",
+            "message",
+            "output",
+            "password",
+            "path",
+            "payload",
+            "prompt",
+            "request",
+            "response",
+            "secret",
+            "token",
+            "tool_input",
+            "unknown_name",
+        ):
+            assert safe_parameter_value(name, private_value) == "<redacted>"
+            assert private_value not in readable_title(
+                "test_private_value",
+                {name: private_value},
+            )
+
+    def test_preserves_only_valid_allowlisted_values(self) -> None:
+        """Retain useful roles, statuses, IDs, booleans, and exceptions."""
+        assert (
+            safe_parameter_value(
+                "role",
+                DevelopmentRole.BUSINESS_ANALYST,
+            )
+            == "business_analyst"
+        )
+        assert safe_parameter_value("status", "completed") == "completed"
+        assert safe_parameter_value("feature_id", 7) == "7"
+        assert safe_parameter_value("enabled", True) == "True"
+        assert (
+            safe_parameter_value("expected_exception", RuntimeError)
+            == "RuntimeError"
+        )
+        assert safe_parameter_value("role", "private-value") == "<redacted>"
+
+    def test_renders_collections_deterministically(self) -> None:
+        """Sort sets while preserving intentional list and tuple order."""
+        first_set = {"list_tasks", "get_feature", "list_artifacts"}
+        second_set: set[str] = set()
+        for tool_name in ("list_artifacts", "get_feature", "list_tasks"):
+            second_set.add(tool_name)
+
+        expected_set = "[get_feature, list_artifacts, list_tasks]"
+        assert safe_parameter_value("tool_names", first_set) == expected_set
+        assert safe_parameter_value("tool_names", second_set) == expected_set
+        assert (
+            safe_parameter_value(
+                "tool_names",
+                frozenset(second_set),
+            )
+            == expected_set
+        )
+        assert (
+            safe_parameter_value(
+                "tool_names",
+                ["list_tasks", "get_feature"],
+            )
+            == "[list_tasks, get_feature]"
+        )
+        assert (
+            safe_parameter_value(
+                "tool_names",
+                ("get_feature", "list_tasks"),
+            )
+            == "[get_feature, list_tasks]"
+        )
+        assert (
+            safe_reported_parameter_value(
+                "tool_names",
+                "'[get_feature, list_tasks]'",
+            )
+            == "[get_feature, list_tasks]"
+        )
+
     def test_replaces_unreadable_parameter_objects(self) -> None:
-        """Represent complex values by type instead of leaking their repr."""
+        """Redact complex values instead of exposing their representations."""
         value = object()
 
-        assert safe_parameter_value("value", value) == "<object>"
+        assert safe_parameter_value("value", value) == "<redacted>"

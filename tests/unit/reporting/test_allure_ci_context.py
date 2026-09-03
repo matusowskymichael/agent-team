@@ -49,7 +49,7 @@ class TestAllureCIContext:
         assert "run 456" in str(executor["buildName"])
         assert "pull/12" in str(executor["buildName"])
         assert executor["reportUrl"] == (
-            "https://matusowskymichael.github.io/agent-team/"
+            "https://github.com/matusowskymichael/agent-team/actions/runs/456"
         )
 
     def test_omits_executor_outside_github_actions(self) -> None:

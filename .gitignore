@@ -19,6 +19,7 @@ env/
 coverage.xml
 htmlcov/
 allure-results/
+allure-results-raw/
 allure-report/
 allure-agent-report/
 

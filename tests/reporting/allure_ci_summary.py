@@ -1,4 +1,4 @@
-"""Write a concise GitHub summary from raw Allure test results."""
+"""Write a concise GitHub summary from sanitized Allure test results."""
 
 import argparse
 import json

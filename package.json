@@ -4,6 +4,7 @@
   "private": true,
   "description": "Pinned local tooling for Agent Team Allure reports.",
   "scripts": {
+    "allure:sanitize": "uv run python -m tests.reporting.allure_result_sanitizer --source-dir allure-results-raw --output-dir allure-results --selection \"not ollama and not ollama_eval\"",
     "allure:generate": "allure generate allure-results --output allure-report",
     "allure:open": "allure open allure-report",
     "allure:agent": "allure agent inspect allure-results --output allure-agent-report",

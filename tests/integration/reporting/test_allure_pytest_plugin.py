@@ -6,6 +6,8 @@ from typing import cast
 
 import pytest
 
+from tests.reporting.allure_result_sanitizer import sanitize_allure_results
+
 
 class TestAllurePytestPlugin:
     """Nested pytest execution tests for opt-in Allure output."""
@@ -193,6 +195,81 @@ class TestAllurePytestPlugin:
         )
         assert diagnostic["phase"] == "setup"
         assert diagnostic["exception_type"] == "RuntimeError"
+
+    def test_failed_result_is_safe_only_after_publish_boundary(
+        self,
+        pytester: pytest.Pytester,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Sanitize real failure details and captured textual attachments."""
+        sentinels = (
+            "status-live-secret-71ad",
+            "stdout-live-secret-82be",
+            "stderr-live-secret-93cf",
+            "log-live-secret-a4d0",
+            "json-live-secret-b5e1",
+            "text-live-secret-c6f2",
+            "arguments-live-secret-d703",
+        )
+        pytester.makepyfile(
+            test_sample=f'''
+            import json
+            import logging
+            import sys
+
+            import allure
+            import pytest
+
+            class TestSample:
+                @pytest.mark.parametrize(
+                    "arguments_json",
+                    ['{{"prompt":"{sentinels[6]}"}}'],
+                )
+                def test_private_failure(self, arguments_json):
+                    print("prompt={sentinels[1]}")
+                    print("token={sentinels[2]}", file=sys.stderr)
+                    logging.warning("password={sentinels[3]}")
+                    allure.attach(
+                        json.dumps({{"request": "{sentinels[4]}"}}),
+                        name="Private JSON",
+                        attachment_type=allure.attachment_type.JSON,
+                    )
+                    allure.attach(
+                        "response={sentinels[5]}",
+                        name="Private text",
+                        attachment_type=allure.attachment_type.TEXT,
+                    )
+                    raise RuntimeError("password={sentinels[0]}")
+            ''',
+        )
+
+        result = pytester.runpytest_subprocess(
+            "-o",
+            "addopts=",
+            "-p",
+            "tests.reporting.allure_pytest_plugin",
+            "--alluredir=allure-results-raw",
+            "--clean-alluredir",
+        )
+        capsys.readouterr()
+
+        result.assert_outcomes(failed=1)
+        sanitized_directory = pytester.path / "allure-results"
+        sanitize_allure_results(
+            pytester.path / "allure-results-raw",
+            sanitized_directory,
+            test_selection="unit",
+            environment={},
+        )
+
+        for path in sanitized_directory.iterdir():
+            content = path.read_bytes()
+            for sentinel in sentinels:
+                assert sentinel.encode() not in content
+        result_data = _single_result(sanitized_directory)
+        details = cast("dict[str, str]", result_data["statusDetails"])
+        assert details["message"] == "RuntimeError: [REDACTED]"
+        assert "traceback omitted" in details["trace"]
 
 
 def _single_result(results_directory: Path) -> dict[str, object]:

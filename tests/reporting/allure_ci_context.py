@@ -77,15 +77,15 @@ def github_executor(
     assert workflow is not None
     assert reference is not None
     repository_url = f"https://github.com/{repository}"
-    owner, project = repository.split("/", maxsplit=1)
+    workflow_run_url = f"{repository_url}/actions/runs/{run_id}"
     return {
         "name": "GitHub Actions",
         "type": "github",
         "buildName": (f"{workflow} #{run_number} (run {run_id}, {reference})"),
-        "buildUrl": f"{repository_url}/actions/runs/{run_id}",
+        "buildUrl": workflow_run_url,
         "buildOrder": run_number,
         "reportName": f"{repository} {workflow} #{run_number}",
-        "reportUrl": f"https://{owner}.github.io/{project}/",
+        "reportUrl": workflow_run_url,
     }
 
 
