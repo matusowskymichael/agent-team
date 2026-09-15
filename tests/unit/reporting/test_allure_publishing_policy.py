@@ -1,4 +1,4 @@
-"""Tests for private, sanitized Allure publication policy."""
+"""Tests for sanitized Allure publication policy."""
 
 import json
 from pathlib import Path
@@ -42,16 +42,42 @@ class TestAllurePublishingPolicy:
         assert "SANITIZE_STATUS" in workflow
         assert 'PYTEST_STATUS: "${{ steps.pytest.outcome }}"' in workflow
 
-    def test_ci_has_no_public_pages_deployment(self) -> None:
-        """Keep private-repository reports out of public GitHub Pages."""
+    def test_ci_public_pages_deploys_only_sanitized_main_report(
+        self,
+    ) -> None:
+        """Publish only the sanitized report after successful main CI."""
         workflow = Path(".github/workflows/ci.yml").read_text(
             encoding="utf-8",
         )
 
-        assert "deploy-pages" not in workflow
-        assert "pages: write" not in workflow
-        assert "id-token: write" not in workflow
-        assert "upload-pages-artifact" not in workflow
+        upload_step = _step(
+            workflow,
+            "Upload sanitized Allure report for GitHub Pages",
+        )
+        pages_job = workflow[workflow.index("\n  publish-pages:") :]
+
+        assert "success()" in upload_step
+        assert "github.ref == 'refs/heads/main'" in upload_step
+        assert "github.event_name == 'push'" in upload_step
+        assert "github.event_name == 'workflow_dispatch'" in upload_step
+        assert "path: allure-report" in upload_step
+        assert "allure-results-raw" not in upload_step
+        assert workflow.index("Enforce checks and reporting") < workflow.index(
+            "Upload sanitized Allure report for GitHub Pages",
+        )
+
+        assert "needs: test-and-report" in pages_job
+        assert "needs.test-and-report.result == 'success'" in pages_job
+        assert "github.ref == 'refs/heads/main'" in pages_job
+        assert "github.event_name == 'pull_request'" not in pages_job
+        assert "pages: write" in pages_job
+        assert "id-token: write" in pages_job
+        assert "name: github-pages" in pages_job
+        assert "actions/configure-pages@" in pages_job
+        assert "actions/deploy-pages@" in pages_job
+        assert "allure-results-raw" not in pages_job
+        assert workflow.count("pages: write") == 1
+        assert workflow.count("id-token: write") == 1
 
     def test_local_report_commands_consume_only_sanitized_results(
         self,
