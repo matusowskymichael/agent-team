@@ -72,6 +72,8 @@ class FakeAgentAuditRepository:
             error_message=None,
             session_id=run.session_id,
             feature_id=run.feature_id,
+            task_id=run.task_id,
+            workspace_identity_hash=run.workspace_identity_hash,
             generation_metadata=None,
         )
         self.runs[run_record.id] = run_record
@@ -230,6 +232,8 @@ class FakeAgentAuditRepository:
                 max_turns=6,
                 session_id=None,
                 feature_id=feature_id,
+                task_id=None if task is None else task.task_id,
+                workspace_identity_hash=None,
             ),
         )
 

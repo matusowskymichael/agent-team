@@ -113,6 +113,11 @@ def _print_run_details(details: AgentRunDetails) -> None:
     print(f"Role: {run.role.value}")
     print(f"Model: {run.model}")
     print(f"Feature ID: {_optional_number(run.feature_id)}")
+    print(f"Task ID: {_optional_number(run.task_id)}")
+    print(
+        "Workspace identity hash: "
+        f"{_optional_text(run.workspace_identity_hash)}"
+    )
     print(f"Session ID: {_optional_text(run.session_id)}")
     print(f"Started: {_timestamp(run.started_at)}")
     print(f"Ended: {_optional_timestamp(run.ended_at)}")

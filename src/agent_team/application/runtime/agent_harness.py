@@ -13,11 +13,17 @@ from agent_team.application.runtime.agent_profile_catalog import (
 from agent_team.application.sessions.agent_session_service import (
     AgentSessionService,
 )
+from agent_team.application.sessions.workspace_identity import (
+    workspace_identity_hash,
+)
 from agent_team.application.skills.agent_skill_context_builder import (
     AgentSkillContextBuilder,
 )
 from agent_team.application.skills.agent_skill_service import (
     AgentSkillService,
+)
+from agent_team.application.workflow.task_verification_service import (
+    TaskVerificationService,
 )
 from agent_team.domain.audit.agent_audit_repository import AgentAuditRepository
 from agent_team.domain.audit.agent_run_start import AgentRunStart
@@ -32,6 +38,12 @@ from agent_team.domain.context.agent_context_provider import (
     AgentContextProvider,
 )
 from agent_team.domain.runtime.agent_executor import AgentExecutor
+from agent_team.domain.runtime.agent_implementation_status import (
+    AgentImplementationStatus,
+)
+from agent_team.domain.runtime.agent_not_implemented_error import (
+    AgentNotImplementedError,
+)
 from agent_team.domain.runtime.agent_output_blank_error import (
     AgentOutputBlankError,
 )
@@ -44,6 +56,18 @@ from agent_team.domain.runtime.agent_runtime import AgentRuntime
 from agent_team.domain.runtime.agent_task import AgentTask
 from agent_team.domain.sessions.agent_session_metadata import (
     AgentSessionMetadata,
+)
+from agent_team.domain.workflow.development_task_not_found_error import (
+    DevelopmentTaskNotFoundError,
+)
+from agent_team.domain.workflow.task_submission_error import (
+    TaskSubmissionError,
+)
+from agent_team.domain.workflow.task_transition_error import (
+    TaskTransitionError,
+)
+from agent_team.domain.workflow.task_verification_evidence import (
+    TaskVerificationEvidence,
 )
 
 BLANK_OUTPUT_RECOVERY_PROMPT = (
@@ -63,6 +87,7 @@ class AgentHarness(AgentExecutor):
     session_service: AgentSessionService | None = None
     context_provider: AgentContextProvider | None = None
     skill_service: AgentSkillService | None = None
+    task_verification_service: TaskVerificationService | None = None
     skill_context_builder: AgentSkillContextBuilder = field(
         default_factory=AgentSkillContextBuilder,
     )
@@ -73,10 +98,18 @@ class AgentHarness(AgentExecutor):
     async def execute(self, task: AgentTask) -> AgentResult:
         """Execute an agent task through a role-specific profile."""
         profile = self.profile_catalog.get_profile(task.role)
+        if (
+            profile.implementation_status
+            is AgentImplementationStatus.PLACEHOLDER
+        ):
+            raise AgentNotImplementedError(
+                f"The {profile.role.value} role is not implemented yet.",
+            )
         session = self._prepare_session(task)
         context = self._build_context(task, session)
         skill_context = self._build_skill_context(profile)
         prompt_excerpt = sanitize_text(task.prompt)
+        workspace_hash = _workspace_identity_hash(task)
         run = self.audit_repository.start_run(
             AgentRunStart(
                 role=profile.role,
@@ -86,6 +119,8 @@ class AgentHarness(AgentExecutor):
                 max_turns=profile.run_limits.max_turns,
                 session_id=None if session is None else session.session_id,
                 feature_id=task.feature_id,
+                task_id=task.task_id,
+                workspace_identity_hash=workspace_hash,
             ),
         )
 
@@ -107,7 +142,21 @@ class AgentHarness(AgentExecutor):
                     context,
                     skill_context,
                 )
+            verification = self._verify_pending_task(task)
+            if (
+                verification is not None
+                and not _is_incomplete_output(result)
+                and not _is_blank_output(result)
+            ):
+                result = replace(
+                    result,
+                    response=_append_verification_summary(
+                        result.response,
+                        verification,
+                    ),
+                )
         except Exception as error:
+            self._try_verify_pending_task(task)
             error_type, error_message = sanitize_error(error)
             try:
                 self.audit_repository.fail_run(
@@ -169,6 +218,8 @@ class AgentHarness(AgentExecutor):
             feature_id=task.feature_id,
             role=task.role,
             requested_session_id=task.session_id,
+            task_id=task.task_id,
+            workspace_identity_hash=_workspace_identity_hash(task),
         )
 
     def _build_context(
@@ -184,6 +235,8 @@ class AgentHarness(AgentExecutor):
             feature_id=task.feature_id,
             role=task.role,
             session_id=session.session_id,
+            task_id=task.task_id,
+            workspace_identity_hash=session.workspace_identity_hash,
         )
 
     def _build_skill_context(self, profile: AgentProfile) -> str | None:
@@ -200,6 +253,31 @@ class AgentHarness(AgentExecutor):
             for invocation in invocations
         )
 
+    def _verify_pending_task(
+        self,
+        task: AgentTask,
+    ) -> TaskVerificationEvidence | None:
+        if (
+            self.task_verification_service is None
+            or task.task_id is None
+            or task.workspace_root is None
+        ):
+            return None
+        return self.task_verification_service.verify_task_if_pending(
+            task.task_id,
+            task.workspace_root,
+        )
+
+    def _try_verify_pending_task(self, task: AgentTask) -> None:
+        try:
+            self._verify_pending_task(task)
+        except (
+            DevelopmentTaskNotFoundError,
+            TaskSubmissionError,
+            TaskTransitionError,
+        ):
+            return
+
 
 def _is_incomplete_output(result: AgentResult) -> bool:
     metadata = result.generation_metadata
@@ -214,4 +292,25 @@ def _blank_recovery_task(task: AgentTask) -> AgentTask:
     return replace(
         task,
         prompt=f"{task.prompt}\n\n{BLANK_OUTPUT_RECOVERY_PROMPT}",
+    )
+
+
+def _workspace_identity_hash(task: AgentTask) -> str | None:
+    if task.workspace_root is None:
+        return None
+    return workspace_identity_hash(task.workspace_root)
+
+
+def _append_verification_summary(
+    response: str,
+    evidence: TaskVerificationEvidence,
+) -> str:
+    check_names = ", ".join(check.name for check in evidence.checks) or "none"
+    return (
+        f"{response}\n\n"
+        "Verification result: "
+        f"{evidence.outcome.value} "
+        f"({evidence.failure_classification.value}); "
+        f"checks: {check_names}; "
+        f"feedback: {evidence.feedback}"
     )

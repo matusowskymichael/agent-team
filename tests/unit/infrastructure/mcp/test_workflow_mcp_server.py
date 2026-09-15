@@ -46,6 +46,7 @@ class TestWorkflowMcpServer:
             "create_task",
             "list_tasks",
             "update_task_status",
+            "submit_task_for_verification",
         }
         assert create_feature.description is not None
         assert "status" in create_feature.input_schema["properties"]
@@ -125,13 +126,13 @@ class TestWorkflowMcpServer:
                 "update_task_status",
                 {
                     "task_id": task_id,
-                    "status": "completed",
+                    "status": "in_progress",
                 },
             ),
         )
         updated_task = _structured_content(updated_result)
 
-        assert updated_task["status"] == "completed"
+        assert updated_task["status"] == "in_progress"
 
 
 def _structured_content(result: object) -> Mapping[str, object]:

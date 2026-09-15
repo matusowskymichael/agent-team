@@ -292,8 +292,8 @@ class TestEvalHarness:
         assert len(architect_development.cases) == 24
         assert len(architect_holdout.cases) == 5
         assert development.dataset_version == "2026-08-20.5"
-        assert backend_development.dataset_version == "2026-09-02.2"
-        assert frontend_development.dataset_version == "2026-09-02.2"
+        assert backend_development.dataset_version == "2026-09-15.0"
+        assert frontend_development.dataset_version == "2026-09-15.0"
         assert architect_development.dataset_version == "2026-08-24.1"
         assert architect_holdout.dataset_version == "2026-08-24.0"
         assert development.dataset_hash
@@ -384,12 +384,16 @@ class TestEvalHarness:
             "find_symbol",
             "run_check",
             "search_code",
+            "submit_task_for_verification",
+            "update_task_status",
         }
         assert _tool_names(_case_from_suite(frontend, "fd-dev-002")) >= {
             "apply_patch",
             "find_symbol",
             "run_check",
             "search_code",
+            "submit_task_for_verification",
+            "update_task_status",
         }
         backend_reuse = _case_from_suite(backend, "bd-dev-003")
         frontend_reuse = _case_from_suite(frontend, "fd-dev-003")
@@ -405,6 +409,19 @@ class TestEvalHarness:
             "assigned_role": "backend_developer",
             "status": "completed",
         }
+        assert _expected_effect(
+            _case_from_suite(backend, "bd-dev-004"),
+            "task_handoffs",
+            "insert",
+        )["changed_paths"] == ["backend/audit_export.py"]
+        assert (
+            _expected_effect(
+                _case_from_suite(backend, "bd-dev-004"),
+                "task_verifications",
+                "insert",
+            )["outcome"]
+            == "passed"
+        )
         assert _expected_status_update(
             _case_from_suite(frontend, "fd-dev-004"),
         ) == {
@@ -413,6 +430,19 @@ class TestEvalHarness:
             "assigned_role": "frontend_developer",
             "status": "completed",
         }
+        assert _expected_effect(
+            _case_from_suite(frontend, "fd-dev-004"),
+            "task_handoffs",
+            "insert",
+        )["changed_paths"] == ["frontend/EmptyState.tsx"]
+        assert (
+            _expected_effect(
+                _case_from_suite(frontend, "fd-dev-004"),
+                "task_verifications",
+                "insert",
+            )["outcome"]
+            == "passed"
+        )
 
     @pytest.mark.parametrize(
         (
@@ -1965,6 +1995,17 @@ class TestEvalHarness:
                 ),
             ),
         )
+        submission_candidate = replace(
+            _ollama_unavailable_candidate(),
+            tool_calls=(
+                ObservedToolCall(
+                    name="submit_task_for_verification",
+                    arguments={"task_id": 1},
+                    status="completed",
+                    reached_mcp=True,
+                ),
+            ),
+        )
         effect_candidate = replace(
             _ollama_unavailable_candidate(),
             database_effects=(_database_effect("features", "insert"),),
@@ -1973,6 +2014,7 @@ class TestEvalHarness:
         for candidate in (
             patch_candidate,
             workflow_mutation_candidate,
+            submission_candidate,
             effect_candidate,
         ):
             candidate_runner = _SequenceCandidateRunner((candidate,))
@@ -3090,6 +3132,17 @@ def _expected_status_update(case: EvalCase) -> dict[str, object]:
         ):
             return effect.field_values
     raise AssertionError(f"Missing expected task update for {case.id}.")
+
+
+def _expected_effect(
+    case: EvalCase,
+    table: str,
+    operation: str,
+) -> dict[str, object]:
+    for effect in case.expected_database_effects:
+        if effect.table == table and effect.operation == operation:
+            return effect.field_values
+    raise AssertionError(f"Missing expected {table}.{operation}.")
 
 
 def _minimal_case_record() -> dict[str, object]:

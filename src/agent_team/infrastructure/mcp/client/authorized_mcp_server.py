@@ -1,5 +1,6 @@
 """Authorized MCP server wrapper."""
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
@@ -21,12 +22,16 @@ from agent_team.application.audit.audit_sanitizer import (
 from agent_team.domain.audit.tool_classification import ToolClassification
 from agent_team.domain.audit.tool_invocation_denial import ToolInvocationDenial
 from agent_team.domain.audit.tool_invocation_start import ToolInvocationStart
+from agent_team.domain.audit.tool_invocation_status import (
+    ToolInvocationStatus,
+)
 from agent_team.domain.runtime.agent_profile import AgentProfile
 from agent_team.domain.runtime.capability_denied_error import (
     CapabilityDeniedError,
 )
 from agent_team.domain.runtime.workflow_tool_name import WorkflowToolName
 from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 from agent_team.infrastructure.mcp.client.development_workflow_mcp_server_config import (  # noqa: E501
     DevelopmentWorkflowMCPServerConfig,
 )
@@ -36,6 +41,14 @@ from agent_team.infrastructure.mcp.client.development_workflow_mcp_server_config
 # are limited to this adapter.
 
 CREATED_BY_ARGUMENT = "created_by"
+TRUSTED_SUBMISSION_ARGUMENTS = frozenset(
+    {
+        "agent_run_id",
+        "submitted_by",
+        "attribution",
+        "changed_paths",
+    },
+)
 CAPABILITY_DENIED_PREFIX = "CAPABILITY_DENIED"
 NON_RETRYABLE_DENIAL_SUFFIX = (
     "Do not retry this action with different arguments."
@@ -57,6 +70,7 @@ MUTATING_TOOLS = frozenset(
         WorkflowToolName.ADD_ARTIFACT.value,
         WorkflowToolName.CREATE_TASK.value,
         WorkflowToolName.UPDATE_TASK_STATUS.value,
+        WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION.value,
     },
 )
 
@@ -235,6 +249,17 @@ class AuthorizedMCPServer(MCPServer):
                 "created_by; actor identity is assigned by trusted runtime "
                 "context.",
             )
+        if (
+            tool_name == WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION.value
+            and arguments is not None
+        ):
+            supplied = sorted(set(arguments) & TRUSTED_SUBMISSION_ARGUMENTS)
+            if supplied:
+                raise CapabilityDeniedError(
+                    f"The {self.profile.role.value} role cannot provide "
+                    f"{', '.join(supplied)}; submission provenance is "
+                    "assigned by trusted runtime context.",
+                )
 
     def _delegated_arguments(
         self,
@@ -246,6 +271,14 @@ class AuthorizedMCPServer(MCPServer):
             delegated_arguments.setdefault("status", TaskStatus.PENDING.value)
             return delegated_arguments
 
+        if tool_name == WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION.value:
+            delegated_arguments = dict(arguments or {})
+            delegated_arguments["agent_run_id"] = self.run.id
+            delegated_arguments["submitted_by"] = self.profile.role.value
+            delegated_arguments["attribution"] = _trusted_actor(self.profile)
+            delegated_arguments["changed_paths"] = self._changed_paths()
+            return delegated_arguments
+
         if tool_name != WorkflowToolName.ADD_ARTIFACT.value:
             return arguments
 
@@ -254,6 +287,25 @@ class AuthorizedMCPServer(MCPServer):
             self.profile,
         )
         return delegated_arguments
+
+    def _changed_paths(self) -> list[str]:
+        invocations = self.audit_repository.list_tool_invocations(
+            self.run.id,
+        )
+        paths: set[str] = set()
+        for invocation in invocations:
+            if invocation.server_name != "workspace":
+                continue
+            if invocation.tool_name != WorkspaceToolName.APPLY_PATCH.value:
+                continue
+            if invocation.status is not ToolInvocationStatus.COMPLETED:
+                continue
+            if not _result_applied(invocation.result_preview):
+                continue
+            path = _path_from_arguments(invocation.arguments_preview_json)
+            if path is not None:
+                paths.add(path)
+        return sorted(paths)
 
     async def list_prompts(self) -> ListPromptsResult:
         """List prompts from the delegate server."""
@@ -277,7 +329,18 @@ def _classify_tool(tool_name: str) -> ToolClassification:
 
 
 def _model_visible_tool(tool: Tool) -> Tool:
-    if tool.name != WorkflowToolName.ADD_ARTIFACT.value:
+    if tool.name == WorkflowToolName.ADD_ARTIFACT.value:
+        return _hide_schema_arguments(tool, frozenset({CREATED_BY_ARGUMENT}))
+    if tool.name == WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION.value:
+        return _hide_schema_arguments(tool, TRUSTED_SUBMISSION_ARGUMENTS)
+    return tool
+
+
+def _hide_schema_arguments(
+    tool: Tool,
+    hidden_arguments: frozenset[str],
+) -> Tool:
+    if not hidden_arguments:
         return tool
 
     input_schema = _copy_mapping(
@@ -288,14 +351,15 @@ def _model_visible_tool(tool: Tool) -> Tool:
         copied_properties = _copy_mapping(
             cast("Mapping[str, object]", properties),
         )
-        copied_properties.pop(CREATED_BY_ARGUMENT, None)
+        for argument in hidden_arguments:
+            copied_properties.pop(argument, None)
         input_schema["properties"] = copied_properties
 
     required = input_schema.get("required")
     if isinstance(required, list):
         required_values = cast("Sequence[object]", required)
         input_schema["required"] = [
-            value for value in required_values if value != CREATED_BY_ARGUMENT
+            value for value in required_values if value not in hidden_arguments
         ]
 
     return tool.model_copy(update={"input_schema": input_schema}, deep=True)
@@ -334,3 +398,33 @@ def _capability_denied_message(error: CapabilityDeniedError) -> str:
     return (
         f"{CAPABILITY_DENIED_PREFIX}: {detail} {NON_RETRYABLE_DENIAL_SUFFIX}"
     )
+
+
+def _path_from_arguments(arguments_preview_json: str) -> str | None:
+    try:
+        parsed: object = json.loads(arguments_preview_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    parsed_mapping = cast("dict[str, object]", parsed)
+    path = parsed_mapping.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    return path
+
+
+def _result_applied(result_preview: str | None) -> bool:
+    if result_preview is None:
+        return False
+    try:
+        parsed: object = json.loads(result_preview)
+    except json.JSONDecodeError:
+        return (
+            '"applied":true' in result_preview
+            or '"applied": true' in result_preview
+        )
+    if not isinstance(parsed, dict):
+        return False
+    parsed_mapping = cast("dict[str, object]", parsed)
+    return parsed_mapping.get("applied") is True

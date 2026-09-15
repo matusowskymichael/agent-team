@@ -160,11 +160,11 @@ class TestWorkflowMcpStdio:
                 "update_task_status",
                 {
                     "task_id": task_id,
-                    "status": "completed",
+                    "status": "in_progress",
                 },
             )
             updated_task = _structured_content(updated_task_result)
-            assert updated_task["status"] == "completed"
+            assert updated_task["status"] == "in_progress"
 
     async def _run_agents_sdk_round_trip(self, tmp_path: Path) -> None:
         database_path = tmp_path / "workflow.db"

@@ -17,16 +17,36 @@ CREATE TABLE IF NOT EXISTS agent_session_bindings (
     session_id TEXT PRIMARY KEY,
     feature_id INTEGER NOT NULL,
     role TEXT NOT NULL,
+    task_id INTEGER,
+    workspace_identity_hash TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_agent_session_bindings_feature_id
-ON agent_session_bindings(feature_id);
-
-CREATE INDEX IF NOT EXISTS idx_agent_session_bindings_role
-ON agent_session_bindings(role);
 """
+
+_SESSION_METADATA_COLUMNS = (
+    ("task_id", "INTEGER"),
+    ("workspace_identity_hash", "TEXT"),
+)
+
+_INDEXES_SQL = (
+    """
+CREATE INDEX IF NOT EXISTS idx_agent_session_bindings_feature_id
+ON agent_session_bindings(feature_id)
+""",
+    """
+CREATE INDEX IF NOT EXISTS idx_agent_session_bindings_role
+ON agent_session_bindings(role)
+""",
+    """
+CREATE INDEX IF NOT EXISTS idx_agent_session_bindings_task_id
+ON agent_session_bindings(task_id)
+""",
+    """
+CREATE INDEX IF NOT EXISTS idx_agent_session_bindings_workspace_identity
+ON agent_session_bindings(workspace_identity_hash)
+""",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +59,10 @@ class SQLiteAgentSessionRepository:
         """Create the database directory and session schema."""
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with self._transaction() as connection:
-            connection.executescript(SESSION_SCHEMA_SQL)
+            connection.execute(SESSION_SCHEMA_SQL)
+            _ensure_session_columns(connection)
+            for index_sql in _INDEXES_SQL:
+                connection.execute(index_sql)
 
     def get_session(
         self,
@@ -53,6 +76,8 @@ class SQLiteAgentSessionRepository:
                     session_id,
                     feature_id,
                     role,
+                    task_id,
+                    workspace_identity_hash,
                     created_at,
                     updated_at
                 FROM agent_session_bindings
@@ -67,6 +92,8 @@ class SQLiteAgentSessionRepository:
         session_id: str,
         feature_id: int,
         role: DevelopmentRole,
+        task_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentSessionMetadata:
         """Persist a new local session binding."""
         timestamp = _format_timestamp(_utc_now())
@@ -77,15 +104,19 @@ class SQLiteAgentSessionRepository:
                     session_id,
                     feature_id,
                     role,
+                    task_id,
+                    workspace_identity_hash,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
                     feature_id,
                     role.value,
+                    task_id,
+                    workspace_identity_hash,
                     timestamp,
                     timestamp,
                 ),
@@ -136,6 +167,8 @@ def _select_session(
             session_id,
             feature_id,
             role,
+            task_id,
+            workspace_identity_hash,
             created_at,
             updated_at
         FROM agent_session_bindings
@@ -155,6 +188,10 @@ def _map_session(row: sqlite3.Row) -> AgentSessionMetadata:
         role=DevelopmentRole(str(row["role"])),
         created_at=_parse_timestamp(str(row["created_at"])),
         updated_at=_parse_timestamp(str(row["updated_at"])),
+        task_id=_optional_int(row["task_id"]),
+        workspace_identity_hash=_optional_text(
+            row["workspace_identity_hash"],
+        ),
     )
 
 
@@ -168,3 +205,33 @@ def _format_timestamp(value: datetime) -> str:
 
 def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(UTC)
+
+
+def _ensure_session_columns(connection: sqlite3.Connection) -> None:
+    columns = _table_columns(connection, "agent_session_bindings")
+    for column_name, column_type in _SESSION_METADATA_COLUMNS:
+        if column_name not in columns:
+            connection.execute(
+                "ALTER TABLE agent_session_bindings "
+                f"ADD COLUMN {column_name} {column_type}",
+            )
+
+
+def _table_columns(
+    connection: sqlite3.Connection,
+    table_name: str,
+) -> set[str]:
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(str(value))
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)

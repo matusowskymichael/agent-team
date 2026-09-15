@@ -147,6 +147,15 @@ def _sanitize_mapping(
             description = str(value)
             sanitized["description_hash"] = hash_text(description)
             sanitized["description_length"] = len(description)
+        elif tool_name == "submit_task_for_verification" and key in {
+            "implementation_summary",
+            "reuse_notes",
+            "limitations",
+            "next_action",
+        }:
+            text = str(value)
+            sanitized[f"{key}_hash"] = hash_text(text)
+            sanitized[f"{key}_length"] = len(text)
         elif tool_name in {"add_artifact", "read_file"} and key == "content":
             content = str(value)
             sanitized["content_hash"] = hash_text(content)

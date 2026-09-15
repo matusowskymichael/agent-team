@@ -58,6 +58,8 @@ class TestAuditCliIntegration:
         assert "Run 1" in captured.out
         assert "Status: completed" in captured.out
         assert "Feature ID: 1" in captured.out
+        assert "Task ID: 2" in captured.out
+        assert "Workspace identity hash: workspace-hash" in captured.out
         assert "Session ID: session-1" in captured.out
         assert "Prompt: Create a feature." in captured.out
         assert "development_workflow.create_feature" in captured.out
@@ -79,6 +81,8 @@ def _seed_completed_run(database_path: Path) -> int:
             max_turns=6,
             session_id="session-1",
             feature_id=1,
+            task_id=2,
+            workspace_identity_hash="workspace-hash",
         ),
     )
     invocation = repository.start_tool_invocation(

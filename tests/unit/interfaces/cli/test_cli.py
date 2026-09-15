@@ -3,6 +3,7 @@
 import asyncio
 import runpy
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,18 @@ from agent_team.domain.runtime.capability_denied_error import (
     CapabilityDeniedError,
 )
 from agent_team.domain.runtime.development_role import DevelopmentRole
+from agent_team.domain.workflow import (
+    task_verification_failure_classification as failure_classification,
+)
+from agent_team.domain.workflow.task_verification_check import (
+    TaskVerificationCheck,
+)
+from agent_team.domain.workflow.task_verification_evidence import (
+    TaskVerificationEvidence,
+)
+from agent_team.domain.workflow.task_verification_outcome import (
+    TaskVerificationOutcome,
+)
 from agent_team.infrastructure.configuration.workflow_database_path import (
     AGENT_TEAM_DB_PATH_ENV,
 )
@@ -36,6 +49,25 @@ from agent_team.infrastructure.persistence.sqlite.audit import (
 )
 from agent_team.interfaces.cli import agent_cli as cli
 from tests.unit.fakes.runtime.fake_agent_executor import FakeAgentExecutor
+
+FailureClassification = (
+    failure_classification.TaskVerificationFailureClassification
+)
+
+
+class _FakeTaskVerificationService:
+    def __init__(self, evidence: TaskVerificationEvidence) -> None:
+        self.evidence = evidence
+        self.calls: list[tuple[int, Path]] = []
+
+    def verify_task(
+        self,
+        task_id: int,
+        workspace_root: Path,
+    ) -> TaskVerificationEvidence:
+        """Record verification input and return fixed evidence."""
+        self.calls.append((task_id, workspace_root))
+        return self.evidence
 
 
 class TestCli:
@@ -588,6 +620,88 @@ class TestCli:
         assert "write-requirements-artifact" not in captured.out
         assert captured.err == ""
 
+    def test_list_agents_prints_status_and_capabilities(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """List local agent readiness without contacting Ollama."""
+
+        async def run_prompt(**_kwargs: object) -> AgentResult:
+            raise AssertionError("agent run should not start")
+
+        def ensure_model_ready(_settings: object) -> None:
+            raise AssertionError("Ollama should not be contacted")
+
+        monkeypatch.setattr(cli, "run_prompt", run_prompt)
+        monkeypatch.setattr(
+            cli,
+            "ensure_ollama_model_ready",
+            ensure_model_ready,
+        )
+
+        exit_code = cli.main(["--list-agents"])
+
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert (
+            "ROLE\tSTATUS\tSKILLS\tWORKSPACE_TOOLS\tVERIFICATION_PROFILES"
+        ) in captured.out
+        assert "delivery_manager\tmanual_coordinator\t-" in captured.out
+        assert "backend_developer\trunnable\timplement-backend-task" in (
+            captured.out
+        )
+        assert "frontend_developer\trunnable\timplement-frontend-task" in (
+            captured.out
+        )
+        assert "backend_developer" in captured.out
+        assert "\tbackend" in captured.out
+        assert "\tfrontend" in captured.out
+        assert "qa_engineer\tplaceholder\t-" in captured.out
+        assert "code_reviewer\tplaceholder\t-" in captured.out
+        assert captured.err == ""
+
+    def test_verify_task_command_prints_evidence(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Run the human deterministic verification command."""
+        service = _FakeTaskVerificationService(_verification_evidence())
+
+        def build_service() -> _FakeTaskVerificationService:
+            return service
+
+        monkeypatch.setattr(
+            cli,
+            "build_task_verification_service",
+            build_service,
+        )
+
+        exit_code = cli.main(
+            [
+                "verify-task",
+                "--task-id",
+                "3",
+                "--workspace-root",
+                str(tmp_path),
+            ],
+        )
+
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert service.calls == [(3, tmp_path)]
+        assert "Task ID: 3" in captured.out
+        assert "Submission ID: 7" in captured.out
+        assert "Verifier: fake-verifier" in captured.out
+        assert "Outcome: passed" in captured.out
+        assert "Failure classification: none" in captured.out
+        assert "- backend: exit_code=0, timed_out=False" in captured.out
+        assert captured.err == ""
+
 
 def _assert_task(
     task: AgentTask,
@@ -607,3 +721,33 @@ def _assert_task(
     assert task.session_id == values["session_id"]
     assert task.task_id == values["task_id"]
     assert task.workspace_root == values["workspace_root"]
+
+
+def _verification_evidence() -> TaskVerificationEvidence:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    return TaskVerificationEvidence(
+        id=11,
+        task_id=3,
+        submission_id=7,
+        verifier_name="fake-verifier",
+        outcome=TaskVerificationOutcome.PASSED,
+        failure_classification=FailureClassification.NONE,
+        feedback="All checks passed.",
+        checks=(
+            TaskVerificationCheck(
+                id=13,
+                verification_id=11,
+                name="backend",
+                started_at=timestamp,
+                ended_at=timestamp,
+                exit_code=0,
+                timed_out=False,
+                stdout_hash="stdout-hash",
+                stdout_excerpt="ok",
+                stderr_hash="stderr-hash",
+                stderr_excerpt="",
+            ),
+        ),
+        started_at=timestamp,
+        ended_at=timestamp,
+    )

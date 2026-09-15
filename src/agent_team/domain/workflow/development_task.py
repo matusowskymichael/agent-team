@@ -5,6 +5,9 @@ from datetime import datetime
 
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.domain.workflow.task_verification_contract import (
+    TaskVerificationContract,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,3 +22,4 @@ class DevelopmentTask:
     status: TaskStatus
     created_at: datetime
     updated_at: datetime
+    verification_contract: TaskVerificationContract | None = None

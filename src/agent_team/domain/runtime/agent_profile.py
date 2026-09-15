@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass, field
 
+from agent_team.domain.runtime.agent_implementation_status import (
+    AgentImplementationStatus,
+)
 from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.runtime.workflow_tool_name import WorkflowToolName
@@ -29,6 +32,7 @@ class AgentProfile:
     instructions: str
     allowed_tools: frozenset[WorkflowToolName]
     run_limits: AgentRunLimits
+    implementation_status: AgentImplementationStatus
     allowed_skill_names: frozenset[AgentSkillName] = field(
         default_factory=_empty_skill_names,
     )
@@ -39,5 +43,8 @@ class AgentProfile:
         default_factory=_empty_path_prefixes,
     )
     allowed_workspace_checks: frozenset[str] = field(
+        default_factory=_empty_path_prefixes,
+    )
+    allowed_verification_profiles: frozenset[str] = field(
         default_factory=_empty_path_prefixes,
     )

@@ -57,6 +57,7 @@ MUTATING_TOOL_NAMES = frozenset(
         "apply_patch",
         "create_feature",
         "create_task",
+        "submit_task_for_verification",
         "update_task_status",
     },
 )

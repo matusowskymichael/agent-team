@@ -8,7 +8,15 @@ from agent_team.domain.workflow.artifact_kind import ArtifactKind
 from agent_team.domain.workflow.development_task import DevelopmentTask
 from agent_team.domain.workflow.feature import Feature
 from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_handoff import TaskHandoff
+from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
 from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.domain.workflow.task_verification_evidence import (
+    TaskVerificationEvidence,
+)
+from agent_team.domain.workflow.task_verification_result import (
+    TaskVerificationResult,
+)
 
 
 class WorkflowRepository(Protocol):
@@ -73,4 +81,52 @@ class WorkflowRepository(Protocol):
         status: TaskStatus,
     ) -> DevelopmentTask | None:
         """Update a task status and return the updated task, if it exists."""
+        ...
+
+    def claim_task_for_work(
+        self,
+        task_id: int,
+        from_statuses: frozenset[TaskStatus],
+        active_statuses: frozenset[TaskStatus],
+    ) -> DevelopmentTask | None:
+        """Start one task if no same-role task is already active."""
+        ...
+
+    def transition_task_status(
+        self,
+        task_id: int,
+        from_statuses: frozenset[TaskStatus],
+        to_status: TaskStatus,
+    ) -> DevelopmentTask | None:
+        """Compare-and-set a task status transition."""
+        ...
+
+    def submit_task_handoff(
+        self,
+        draft: TaskHandoffDraft,
+        from_status: TaskStatus,
+        to_status: TaskStatus,
+    ) -> TaskHandoff | None:
+        """Persist a handoff and move the task to verification."""
+        ...
+
+    def latest_task_handoff(self, task_id: int) -> TaskHandoff | None:
+        """Return the newest persisted handoff for a task, if present."""
+        ...
+
+    def record_task_verification(
+        self,
+        task_id: int,
+        submission_id: int,
+        result: TaskVerificationResult,
+        next_status: TaskStatus,
+    ) -> TaskVerificationEvidence:
+        """Persist verification evidence and apply the resulting status."""
+        ...
+
+    def latest_task_verification(
+        self,
+        task_id: int,
+    ) -> TaskVerificationEvidence | None:
+        """Return the newest persisted verification evidence for a task."""
         ...

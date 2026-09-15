@@ -80,3 +80,37 @@ TaskStatusParameter = Annotated[
         description=f"Task status. Valid values: {TASK_STATUS_VALUES}.",
     ),
 ]
+AgentRunIdParameter = Annotated[
+    int,
+    Field(
+        description="Trusted agent run ID injected by runtime context.",
+        ge=1,
+    ),
+]
+AttributionParameter = Annotated[
+    str,
+    Field(
+        description=("Trusted actor attribution injected by runtime context."),
+    ),
+]
+ImplementationSummaryParameter = Annotated[
+    str,
+    Field(description="Concise implementation summary for the handoff."),
+]
+ChangedPathsParameter = Annotated[
+    list[str],
+    Field(
+        description=(
+            "Workspace-relative changed paths derived from successful patch "
+            "audit evidence by trusted runtime context."
+        ),
+    ),
+]
+HandoffItemsParameter = Annotated[
+    list[str],
+    Field(description="Bounded list of concise handoff items."),
+]
+HandoffTextParameter = Annotated[
+    str,
+    Field(description="Concise handoff text."),
+]

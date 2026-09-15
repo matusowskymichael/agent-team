@@ -9,6 +9,9 @@ from agent_team.application.runtime.agent_profile_catalog import (
     AgentProfileCatalog,
 )
 from agent_team.application.workspace.workspace_service import WorkspaceService
+from agent_team.domain.runtime.agent_implementation_status import (
+    AgentImplementationStatus,
+)
 from agent_team.domain.runtime.agent_profile import AgentProfile
 from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
 from agent_team.domain.runtime.agent_task import AgentTask
@@ -467,6 +470,7 @@ def _custom_profile(
         instructions="Test profile.",
         allowed_tools=frozenset(WorkflowToolName),
         run_limits=AgentRunLimits(max_turns=6),
+        implementation_status=AgentImplementationStatus.RUNNABLE,
         allowed_workspace_tools=frozenset(WorkspaceToolName),
         allowed_workspace_path_prefixes=prefixes,
         allowed_workspace_checks=frozenset({"backend"}),

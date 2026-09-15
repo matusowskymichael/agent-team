@@ -29,4 +29,6 @@ class AgentRunRecord:
     error_message: str | None
     session_id: str | None
     feature_id: int | None
+    task_id: int | None = None
+    workspace_identity_hash: str | None = None
     generation_metadata: AgentGenerationMetadata | None = None

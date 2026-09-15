@@ -3,6 +3,9 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from agent_team.application.context.feature_context_render_input import (
+    FeatureContextRenderInput,
+)
 from agent_team.domain.context.agent_context_budget_exceeded_error import (
     AgentContextBudgetExceededError,
 )
@@ -14,9 +17,15 @@ from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.workflow.artifact import Artifact
 from agent_team.domain.workflow.artifact_kind import ArtifactKind
 from agent_team.domain.workflow.development_task import DevelopmentTask
-from agent_team.domain.workflow.feature import Feature
+from agent_team.domain.workflow.development_task_not_found_error import (
+    DevelopmentTaskNotFoundError,
+)
 from agent_team.domain.workflow.feature_not_found_error import (
     FeatureNotFoundError,
+)
+from agent_team.domain.workflow.task_handoff import TaskHandoff
+from agent_team.domain.workflow.task_verification_evidence import (
+    TaskVerificationEvidence,
 )
 from agent_team.domain.workflow.workflow_repository import WorkflowRepository
 
@@ -109,6 +118,8 @@ class FeatureContextBuilder:
         feature_id: int,
         role: DevelopmentRole,
         session_id: str,
+        task_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentContextEnvelope:
         """Build fresh least-privilege context for one feature-scoped run."""
         feature = self.repository.get_feature(feature_id)
@@ -117,13 +128,29 @@ class FeatureContextBuilder:
 
         policy = self.policies[role]
         artifacts = self._select_artifacts(feature_id, policy)
-        tasks = self._select_tasks(feature_id, policy)
+        tasks = self._select_tasks(feature_id, policy, task_id)
+        latest_handoff = (
+            None
+            if task_id is None
+            else self.repository.latest_task_handoff(task_id)
+        )
+        latest_verification = (
+            None
+            if task_id is None
+            else self.repository.latest_task_verification(task_id)
+        )
         authoritative_context = _render_context(
-            feature=feature,
-            artifacts=artifacts,
-            tasks=tasks,
-            policy=policy,
-            role=role,
+            FeatureContextRenderInput(
+                feature=feature,
+                artifacts=artifacts,
+                tasks=tasks,
+                policy=policy,
+                role=role,
+                task_id=task_id,
+                workspace_identity_hash=workspace_identity_hash,
+                latest_handoff=latest_handoff,
+                latest_verification=latest_verification,
+            ),
         )
         if len(authoritative_context) > policy.max_authoritative_context_chars:
             raise AgentContextBudgetExceededError(
@@ -138,6 +165,8 @@ class FeatureContextBuilder:
             max_conversation_history_items=(
                 policy.max_conversation_history_items
             ),
+            task_id=task_id,
+            workspace_identity_hash=workspace_identity_hash,
         )
 
     def _select_artifacts(
@@ -156,7 +185,15 @@ class FeatureContextBuilder:
         self,
         feature_id: int,
         policy: AgentContextPolicy,
+        task_id: int | None,
     ) -> tuple[DevelopmentTask, ...]:
+        if task_id is not None:
+            task = self.repository.get_task(task_id)
+            if task is None or task.feature_id != feature_id:
+                raise DevelopmentTaskNotFoundError(
+                    f"Development task {task_id} was not found.",
+                )
+            return (task,)
         if not policy.include_all_tasks and not policy.task_roles:
             return ()
         tasks = self.repository.list_tasks(feature_id)
@@ -172,35 +209,39 @@ class FeatureContextBuilder:
         return tuple(sorted(selected_tasks, key=lambda item: item.id))
 
 
-def _render_context(
-    feature: Feature,
-    artifacts: tuple[Artifact, ...],
-    tasks: tuple[DevelopmentTask, ...],
-    policy: AgentContextPolicy,
-    role: DevelopmentRole,
-) -> str:
+def _render_context(render_input: FeatureContextRenderInput) -> str:
+    feature = render_input.feature
     lines = [
         "AUTHORITATIVE WORKFLOW CONTEXT",
         "This context is refreshed from the local workflow database for this "
         "run. It outranks conversation history.",
-        f"Active role: {role.value}",
+        f"Active role: {render_input.role.value}",
         f"Feature ID: {feature.id}",
         f"Feature title: {feature.title}",
         f"Feature description: {feature.description}",
         f"Feature status: {feature.status.value}",
         f"Feature created_at: {_timestamp(feature.created_at)}",
         f"Feature updated_at: {_timestamp(feature.updated_at)}",
+        f"Bound task ID: {_optional_int(render_input.task_id)}",
+        (
+            "Workspace identity hash: "
+            f"{_optional_text(render_input.workspace_identity_hash)}"
+        ),
         "",
         "Artifacts included by role policy:",
     ]
-    _append_artifacts(lines, artifacts)
+    _append_artifacts(lines, render_input.artifacts)
     lines.extend(
         (
             "",
             "Development tasks included by role policy:",
         ),
     )
-    _append_tasks(lines, tasks, policy)
+    _append_tasks(lines, render_input.tasks, render_input.policy)
+    lines.extend(("", "Latest task handoff:"))
+    _append_handoff(lines, render_input.latest_handoff)
+    lines.extend(("", "Latest verification evidence:"))
+    _append_verification(lines, render_input.latest_verification)
     lines.extend(
         (
             "",
@@ -253,11 +294,99 @@ def _append_tasks(
                 f"  description: {task.description}",
                 f"  assigned_role: {task.assigned_role.value}",
                 f"  status: {task.status.value}",
+                (f"  verification_contract: {_verification_contract(task)}"),
                 f"  created_at: {_timestamp(task.created_at)}",
                 f"  updated_at: {_timestamp(task.updated_at)}",
             ),
         )
 
 
+def _append_handoff(
+    lines: list[str],
+    handoff: TaskHandoff | None,
+) -> None:
+    if handoff is None:
+        lines.append("- not requested or no handoff exists for this task")
+        return
+    lines.extend(
+        (
+            f"- handoff_id: {handoff.id}",
+            f"  agent_run_id: {handoff.agent_run_id}",
+            f"  submitted_by: {handoff.submitted_by.value}",
+            f"  changed_paths: {', '.join(handoff.changed_paths) or 'none'}",
+            "  implementation_summary:",
+            f"  {handoff.implementation_summary}",
+            f"  reuse_notes: {handoff.reuse_notes}",
+            (
+                "  checks_attempted: "
+                f"{', '.join(handoff.checks_attempted) or 'none'}"
+            ),
+            f"  limitations: {handoff.limitations or 'none'}",
+            f"  next_action: {handoff.next_action}",
+            f"  created_at: {_timestamp(handoff.created_at)}",
+        ),
+    )
+
+
+def _append_verification(
+    lines: list[str],
+    evidence: TaskVerificationEvidence | None,
+) -> None:
+    if evidence is None:
+        lines.append("- not requested or no verification evidence exists")
+        return
+    lines.extend(
+        (
+            f"- verification_id: {evidence.id}",
+            f"  submission_id: {evidence.submission_id}",
+            f"  verifier_name: {evidence.verifier_name}",
+            f"  outcome: {evidence.outcome.value}",
+            (
+                "  failure_classification: "
+                f"{evidence.failure_classification.value}"
+            ),
+            f"  feedback: {evidence.feedback}",
+            f"  started_at: {_timestamp(evidence.started_at)}",
+            f"  ended_at: {_timestamp(evidence.ended_at)}",
+            "  checks:",
+        ),
+    )
+    if not evidence.checks:
+        lines.append("  - explicitly empty")
+        return
+    for check in evidence.checks:
+        lines.extend(
+            (
+                f"  - name: {check.name}",
+                f"    exit_code: {check.exit_code}",
+                f"    timed_out: {check.timed_out}",
+                f"    stdout_hash: {check.stdout_hash}",
+                f"    stderr_hash: {check.stderr_hash}",
+            ),
+        )
+
+
 def _timestamp(value: datetime) -> str:
     return value.isoformat()
+
+
+def _optional_int(value: int | None) -> str:
+    if value is None:
+        return "-"
+    return str(value)
+
+
+def _optional_text(value: str | None) -> str:
+    if value is None:
+        return "-"
+    return value
+
+
+def _verification_contract(task: DevelopmentTask) -> str:
+    contract = task.verification_contract
+    if contract is None:
+        return "none"
+    return (
+        f"profile={contract.profile_name}; "
+        f"required_checks={', '.join(contract.required_checks)}"
+    )

@@ -1,5 +1,7 @@
 """Tests for workflow application service."""
 
+from dataclasses import replace
+
 import pytest
 
 from agent_team.application.workflow.workflow_service import WorkflowService
@@ -12,7 +14,17 @@ from agent_team.domain.workflow.feature_not_found_error import (
     FeatureNotFoundError,
 )
 from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_active_slot_conflict_error import (
+    TaskActiveSlotConflictError,
+)
+from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
 from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.domain.workflow.task_transition_error import (
+    TaskTransitionError,
+)
+from agent_team.domain.workflow.task_verification_configuration_error import (
+    TaskVerificationConfigurationError,
+)
 from agent_team.domain.workflow.workflow_validation_error import (
     WorkflowValidationError,
 )
@@ -48,7 +60,7 @@ class TestWorkflowService:
         )
         updated_task = service.update_task_status(
             task_id=task.id,
-            status="completed",
+            status="in_progress",
         )
 
         assert feature.title == "Build MCP server"
@@ -59,7 +71,7 @@ class TestWorkflowService:
         assert artifact.kind == ArtifactKind.REQUIREMENTS
         assert service.list_artifacts(feature.id) == [artifact]
         assert task.assigned_role == DevelopmentRole.BACKEND_DEVELOPER
-        assert updated_task.status == TaskStatus.COMPLETED
+        assert updated_task.status == TaskStatus.IN_PROGRESS
         assert service.list_tasks(feature.id) == [updated_task]
         overview = service.get_feature_overview(feature.id)
         assert overview.feature == feature
@@ -169,3 +181,147 @@ class TestWorkflowService:
 
         with pytest.raises(DevelopmentTaskNotFoundError):
             service.update_task_status(task_id=404, status=TaskStatus.BLOCKED)
+
+    @pytest.mark.parametrize(
+        ("from_status", "to_status"),
+        [
+            (TaskStatus.PENDING, TaskStatus.IN_PROGRESS),
+            (TaskStatus.PENDING, TaskStatus.BLOCKED),
+            (TaskStatus.BLOCKED, TaskStatus.IN_PROGRESS),
+            (TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED),
+        ],
+    )
+    def test_allows_model_accessible_transitions(
+        self,
+        from_status: TaskStatus,
+        to_status: TaskStatus,
+    ) -> None:
+        """Allow only explicit model-accessible task transitions."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+            from_status,
+        )
+
+        updated_task = service.update_task_status(task.id, to_status)
+
+        assert updated_task.status is to_status
+
+    @pytest.mark.parametrize(
+        ("from_status", "to_status"),
+        [
+            (TaskStatus.PENDING, TaskStatus.COMPLETED),
+            (TaskStatus.PENDING, TaskStatus.VERIFICATION_PENDING),
+            (TaskStatus.COMPLETED, TaskStatus.IN_PROGRESS),
+            (TaskStatus.VERIFICATION_PENDING, TaskStatus.COMPLETED),
+        ],
+    )
+    def test_rejects_forbidden_model_transitions(
+        self,
+        from_status: TaskStatus,
+        to_status: TaskStatus,
+    ) -> None:
+        """Reject status transitions reserved for deterministic code."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+            from_status,
+        )
+
+        with pytest.raises(TaskTransitionError):
+            service.update_task_status(task.id, to_status)
+
+    def test_active_same_role_task_blocks_another_claim(self) -> None:
+        """Allow only one active task per feature and role."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        first_task = service.create_task(
+            feature.id,
+            "First",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        second_task = service.create_task(
+            feature.id,
+            "Second",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        service.update_task_status(first_task.id, TaskStatus.IN_PROGRESS)
+
+        with pytest.raises(TaskActiveSlotConflictError):
+            service.update_task_status(
+                second_task.id,
+                TaskStatus.IN_PROGRESS,
+            )
+
+    def test_submit_task_for_verification_persists_handoff(self) -> None:
+        """Submit an in-progress implementation task for verification."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        service.update_task_status(task.id, TaskStatus.IN_PROGRESS)
+
+        handoff = service.submit_task_for_verification(
+            _handoff_draft(task.id),
+        )
+
+        assert handoff.task_id == task.id
+        assert handoff.changed_paths == ("src/app.py",)
+        submitted_task = repository.get_task(task.id)
+        assert submitted_task is not None
+        assert submitted_task.status is TaskStatus.VERIFICATION_PENDING
+
+    def test_submit_requires_valid_verification_configuration(self) -> None:
+        """Reject submission when the task has no trusted check contract."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        repository.tasks[task.id] = replace(
+            task,
+            status=TaskStatus.IN_PROGRESS,
+            verification_contract=None,
+        )
+
+        with pytest.raises(TaskVerificationConfigurationError):
+            service.submit_task_for_verification(_handoff_draft(task.id))
+
+
+def _handoff_draft(task_id: int) -> TaskHandoffDraft:
+    return TaskHandoffDraft(
+        task_id=task_id,
+        agent_run_id=1,
+        submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
+        attribution="agent:backend_developer",
+        implementation_summary="Patched the assigned backend behavior.",
+        changed_paths=("src/app.py",),
+        reused_symbols=("ExistingService",),
+        new_symbols=("NewHandler",),
+        reuse_notes="Existing service was reused for persistence.",
+        checks_attempted=("backend",),
+        limitations="none",
+        next_action="run deterministic verification",
+    )

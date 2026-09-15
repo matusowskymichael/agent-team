@@ -15,3 +15,5 @@ class AgentSessionMetadata:
     role: DevelopmentRole
     created_at: datetime
     updated_at: datetime
+    task_id: int | None = None
+    workspace_identity_hash: str | None = None

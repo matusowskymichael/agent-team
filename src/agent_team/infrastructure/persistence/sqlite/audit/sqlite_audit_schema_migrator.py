@@ -8,9 +8,10 @@ from agent_team.infrastructure.persistence.sqlite.audit import (
     sqlite_audit_migration_error,
 )
 
-CURRENT_AUDIT_SCHEMA_VERSION = 3
+CURRENT_AUDIT_SCHEMA_VERSION = 4
 AUDIT_SCHEMA_SESSION_METADATA_VERSION = 2
 AUDIT_SCHEMA_GENERATION_METADATA_VERSION = 3
+AUDIT_SCHEMA_TASK_METADATA_VERSION = 4
 
 _CREATE_AGENT_RUNS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -27,6 +28,10 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     output_excerpt TEXT,
     error_type TEXT,
     error_message TEXT,
+    session_id TEXT,
+    feature_id INTEGER,
+    task_id INTEGER,
+    workspace_identity_hash TEXT,
     generation_metadata_json TEXT
 );
 """
@@ -60,6 +65,11 @@ _AGENT_RUN_GENERATION_METADATA_COLUMNS = (
     ("generation_metadata_json", "TEXT"),
 )
 
+_AGENT_RUN_TASK_METADATA_COLUMNS = (
+    ("task_id", "INTEGER"),
+    ("workspace_identity_hash", "TEXT"),
+)
+
 _INDEXES_SQL = (
     """
     CREATE INDEX IF NOT EXISTS idx_agent_runs_role
@@ -80,6 +90,14 @@ _INDEXES_SQL = (
     """
     CREATE INDEX IF NOT EXISTS idx_agent_runs_feature_id
     ON agent_runs(feature_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_task_id
+    ON agent_runs(task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_workspace_identity_hash
+    ON agent_runs(workspace_identity_hash)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_tool_invocations_run_id
@@ -110,18 +128,7 @@ class SQLiteAuditSchemaMigrator:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN")
             version = _schema_version(connection)
-            if version < 1:
-                self._migrate_to_version_1(connection)
-            else:
-                self._ensure_base_tables(connection)
-            if version < AUDIT_SCHEMA_SESSION_METADATA_VERSION:
-                self._migrate_to_version_2(connection)
-            else:
-                self._ensure_session_columns(connection)
-            if version < AUDIT_SCHEMA_GENERATION_METADATA_VERSION:
-                self._migrate_to_version_3(connection)
-            else:
-                self._ensure_generation_columns(connection)
+            self._apply_versioned_migrations(connection, version)
             self._create_indexes(connection)
             connection.execute(
                 f"PRAGMA user_version = {CURRENT_AUDIT_SCHEMA_VERSION}",
@@ -138,6 +145,29 @@ class SQLiteAuditSchemaMigrator:
         finally:
             connection.close()
 
+    def _apply_versioned_migrations(
+        self,
+        connection: sqlite3.Connection,
+        version: int,
+    ) -> None:
+        """Apply each idempotent migration step for the stored version."""
+        if version < 1:
+            self._migrate_to_version_1(connection)
+        else:
+            self._ensure_base_tables(connection)
+        if version < AUDIT_SCHEMA_SESSION_METADATA_VERSION:
+            self._migrate_to_version_2(connection)
+        else:
+            self._ensure_session_columns(connection)
+        if version < AUDIT_SCHEMA_GENERATION_METADATA_VERSION:
+            self._migrate_to_version_3(connection)
+        else:
+            self._ensure_generation_columns(connection)
+        if version < AUDIT_SCHEMA_TASK_METADATA_VERSION:
+            self._migrate_to_version_4(connection)
+        else:
+            self._ensure_task_metadata_columns(connection)
+
     def _migrate_to_version_1(self, connection: sqlite3.Connection) -> None:
         """Create the original audit tables."""
         self._ensure_base_tables(connection)
@@ -149,6 +179,10 @@ class SQLiteAuditSchemaMigrator:
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Add sanitized model-generation metadata."""
         self._ensure_generation_columns(connection)
+
+    def _migrate_to_version_4(self, connection: sqlite3.Connection) -> None:
+        """Add task-scoped run metadata columns."""
+        self._ensure_task_metadata_columns(connection)
 
     def _ensure_base_tables(self, connection: sqlite3.Connection) -> None:
         """Create the base audit tables if they do not already exist."""
@@ -166,6 +200,14 @@ class SQLiteAuditSchemaMigrator:
     ) -> None:
         """Add nullable columns for model generation metadata."""
         for column_name, column_type in _AGENT_RUN_GENERATION_METADATA_COLUMNS:
+            _ensure_agent_run_column(connection, column_name, column_type)
+
+    def _ensure_task_metadata_columns(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add nullable columns for task-scoped run metadata."""
+        for column_name, column_type in _AGENT_RUN_TASK_METADATA_COLUMNS:
             _ensure_agent_run_column(connection, column_name, column_type)
 
     def _create_indexes(self, connection: sqlite3.Connection) -> None:

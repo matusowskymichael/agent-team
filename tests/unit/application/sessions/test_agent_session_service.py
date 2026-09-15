@@ -36,6 +36,8 @@ class _SessionRepository:
         session_id: str,
         feature_id: int,
         role: DevelopmentRole,
+        task_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentSessionMetadata:
         session = AgentSessionMetadata(
             session_id=session_id,
@@ -43,6 +45,8 @@ class _SessionRepository:
             role=role,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
             updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            task_id=task_id,
+            workspace_identity_hash=workspace_identity_hash,
         )
         self.sessions[session_id] = session
         return session
@@ -131,4 +135,82 @@ class TestAgentSessionService:
                 feature_id=1,
                 role=DevelopmentRole.BUSINESS_ANALYST,
                 requested_session_id=session_id,
+            )
+
+    def test_developer_session_requires_task_scope(self) -> None:
+        """Reject developer sessions without trusted task/workspace scope."""
+        service = AgentSessionService(_SessionRepository())
+
+        with pytest.raises(AgentSessionBindingError):
+            service.prepare_session(
+                feature_id=1,
+                role=DevelopmentRole.BACKEND_DEVELOPER,
+                requested_session_id=None,
+                workspace_identity_hash="workspace-hash",
+            )
+
+    def test_derives_developer_session_id_from_task_and_workspace(
+        self,
+    ) -> None:
+        """Create deterministic task-scoped developer sessions."""
+        service = AgentSessionService(_SessionRepository())
+
+        session = service.prepare_session(
+            feature_id=1,
+            role=DevelopmentRole.BACKEND_DEVELOPER,
+            requested_session_id=None,
+            task_id=7,
+            workspace_identity_hash="abcdef1234567890workspace",
+        )
+
+        assert session is not None
+        assert session.session_id == derive_agent_session_id(
+            DevelopmentRole.BACKEND_DEVELOPER,
+            1,
+            7,
+            "abcdef1234567890workspace",
+        )
+        assert session.task_id == 7
+        assert session.workspace_identity_hash == "abcdef1234567890workspace"
+
+    def test_rejects_historical_developer_session_reuse(self) -> None:
+        """Fail old developer sessions that lack task scope."""
+        repository = _SessionRepository()
+        repository.create_session(
+            session_id="legacy-developer-session",
+            feature_id=1,
+            role=DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        service = AgentSessionService(repository)
+
+        with pytest.raises(AgentSessionBindingError) as error:
+            service.prepare_session(
+                feature_id=1,
+                role=DevelopmentRole.BACKEND_DEVELOPER,
+                requested_session_id="legacy-developer-session",
+                task_id=7,
+                workspace_identity_hash="workspace-hash",
+            )
+
+        assert "not task-scoped" in str(error.value)
+
+    def test_rejects_developer_session_for_other_workspace(self) -> None:
+        """Prevent reusing a developer session across workspaces."""
+        repository = _SessionRepository()
+        service = AgentSessionService(repository)
+        service.prepare_session(
+            feature_id=1,
+            role=DevelopmentRole.BACKEND_DEVELOPER,
+            requested_session_id="developer-session",
+            task_id=7,
+            workspace_identity_hash="first-workspace",
+        )
+
+        with pytest.raises(AgentSessionBindingError):
+            service.prepare_session(
+                feature_id=1,
+                role=DevelopmentRole.BACKEND_DEVELOPER,
+                requested_session_id="developer-session",
+                task_id=7,
+                workspace_identity_hash="second-workspace",
             )

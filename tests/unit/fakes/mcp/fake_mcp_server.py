@@ -82,15 +82,45 @@ class FakeMCPServer(MCPServer):
 
 
 def _input_schema(tool_name: str) -> dict[str, Any]:
-    if tool_name != "add_artifact":
-        return {"type": "object", "properties": {}}
-    return {
-        "type": "object",
-        "properties": {
-            "feature_id": {"type": "integer"},
-            "kind": {"type": "string"},
-            "content": {"type": "string"},
-            "created_by": {"type": "string"},
-        },
-        "required": ["feature_id", "kind", "content", "created_by"],
-    }
+    if tool_name == "add_artifact":
+        return {
+            "type": "object",
+            "properties": {
+                "feature_id": {"type": "integer"},
+                "kind": {"type": "string"},
+                "content": {"type": "string"},
+                "created_by": {"type": "string"},
+            },
+            "required": ["feature_id", "kind", "content", "created_by"],
+        }
+    if tool_name == "submit_task_for_verification":
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "agent_run_id": {"type": "integer"},
+                "submitted_by": {"type": "string"},
+                "attribution": {"type": "string"},
+                "implementation_summary": {"type": "string"},
+                "changed_paths": {"type": "array"},
+                "reused_symbols": {"type": "array"},
+                "new_symbols": {"type": "array"},
+                "reuse_notes": {"type": "string"},
+                "checks_attempted": {"type": "array"},
+                "limitations": {"type": "string"},
+                "next_action": {"type": "string"},
+            },
+            "required": [
+                "task_id",
+                "agent_run_id",
+                "submitted_by",
+                "attribution",
+                "implementation_summary",
+                "changed_paths",
+                "reused_symbols",
+                "new_symbols",
+                "reuse_notes",
+                "checks_attempted",
+            ],
+        }
+    return {"type": "object", "properties": {}}

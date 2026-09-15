@@ -16,10 +16,50 @@ from agent_team.domain.workflow.feature_not_found_error import (
 )
 from agent_team.domain.workflow.feature_overview import FeatureOverview
 from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_active_slot_conflict_error import (
+    TaskActiveSlotConflictError,
+)
+from agent_team.domain.workflow.task_handoff import TaskHandoff
+from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
 from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.domain.workflow.task_submission_error import (
+    TaskSubmissionError,
+)
+from agent_team.domain.workflow.task_transition_error import (
+    TaskTransitionError,
+)
+from agent_team.domain.workflow.task_verification_configuration_error import (
+    TaskVerificationConfigurationError,
+)
+from agent_team.domain.workflow.task_verification_profiles import (
+    is_valid_verification_contract,
+)
 from agent_team.domain.workflow.workflow_repository import WorkflowRepository
 from agent_team.domain.workflow.workflow_validation_error import (
     WorkflowValidationError,
+)
+
+ACTIVE_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.IN_PROGRESS,
+        TaskStatus.VERIFICATION_PENDING,
+    },
+)
+MODEL_STATUS_TRANSITIONS = {
+    TaskStatus.PENDING: frozenset(
+        {
+            TaskStatus.IN_PROGRESS,
+            TaskStatus.BLOCKED,
+        },
+    ),
+    TaskStatus.BLOCKED: frozenset({TaskStatus.IN_PROGRESS}),
+    TaskStatus.IN_PROGRESS: frozenset({TaskStatus.BLOCKED}),
+}
+SUBMITTABLE_ROLES = frozenset(
+    {
+        DevelopmentRole.BACKEND_DEVELOPER,
+        DevelopmentRole.FRONTEND_DEVELOPER,
+    },
 )
 
 
@@ -130,15 +170,49 @@ class WorkflowService:
         task_id: int,
         status: TaskStatus | str,
     ) -> DevelopmentTask:
-        """Update an existing task status."""
-        self._require_task(task_id)
+        """Apply a model-accessible task lifecycle transition."""
+        task = self._require_task(task_id)
         task_status = _parse_enum(status, TaskStatus, "status")
-        updated_task = self.repository.update_task_status(task_id, task_status)
-        if updated_task is None:
-            raise DevelopmentTaskNotFoundError(
-                f"Development task {task_id} was not found.",
+        _validate_model_transition(task, task_status)
+        if task_status is TaskStatus.IN_PROGRESS:
+            updated_task = self.repository.claim_task_for_work(
+                task_id=task_id,
+                from_statuses=frozenset({task.status}),
+                active_statuses=ACTIVE_TASK_STATUSES,
             )
+            if updated_task is None:
+                raise TaskActiveSlotConflictError(
+                    "Another task for this feature and role is already "
+                    "active.",
+                )
+            return updated_task
+        updated_task = self.repository.transition_task_status(
+            task_id=task_id,
+            from_statuses=frozenset({task.status}),
+            to_status=task_status,
+        )
+        if updated_task is None:
+            raise TaskTransitionError("Task status changed before update.")
         return updated_task
+
+    def submit_task_for_verification(
+        self,
+        draft: TaskHandoffDraft,
+    ) -> TaskHandoff:
+        """Persist a structured handoff and submit a task for verification."""
+        task = self._require_task(draft.task_id)
+        _validate_submission_task(task, draft)
+        _validate_handoff(draft)
+        handoff = self.repository.submit_task_handoff(
+            draft=draft,
+            from_status=TaskStatus.IN_PROGRESS,
+            to_status=TaskStatus.VERIFICATION_PENDING,
+        )
+        if handoff is None:
+            raise TaskSubmissionError(
+                "Task must be in_progress before submission.",
+            )
+        return handoff
 
     def _require_feature(self, feature_id: int) -> Feature:
         feature = self.repository.get_feature(feature_id)
@@ -175,3 +249,74 @@ def _parse_enum[EnumValue: StrEnum](
         valid_values = ", ".join(item.value for item in enum_type)
         message = f"{field_name} must be one of: {valid_values}."
         raise WorkflowValidationError(message) from error
+
+
+def _validate_model_transition(
+    task: DevelopmentTask,
+    to_status: TaskStatus,
+) -> None:
+    allowed = MODEL_STATUS_TRANSITIONS.get(task.status, frozenset())
+    if to_status not in allowed:
+        raise TaskTransitionError(
+            f"Task cannot transition from {task.status.value} to "
+            f"{to_status.value} through model-accessible tools.",
+        )
+
+
+def _validate_submission_task(
+    task: DevelopmentTask,
+    draft: TaskHandoffDraft,
+) -> None:
+    if task.assigned_role not in SUBMITTABLE_ROLES:
+        raise TaskSubmissionError(
+            f"{task.assigned_role.value} tasks cannot be submitted by the "
+            "developer harness.",
+        )
+    if draft.submitted_by is not task.assigned_role:
+        raise TaskSubmissionError(
+            "Submission role must match the assigned task role.",
+        )
+    if task.status is not TaskStatus.IN_PROGRESS:
+        raise TaskSubmissionError(
+            "Task must be in_progress before submission.",
+        )
+    if not is_valid_verification_contract(
+        task.assigned_role,
+        task.verification_contract,
+    ):
+        raise TaskVerificationConfigurationError(
+            "Task verification configuration is missing or invalid.",
+        )
+
+
+def _validate_handoff(draft: TaskHandoffDraft) -> None:
+    _require_text(draft.attribution, "attribution")
+    _require_text(draft.implementation_summary, "implementation_summary")
+    _require_text(draft.next_action, "next_action")
+    _require_text(draft.reuse_notes, "reuse_notes")
+    _require_text_items(draft.changed_paths, "changed_paths")
+    _normalize_text_items(draft.reused_symbols, "reused_symbols")
+    _normalize_text_items(draft.new_symbols, "new_symbols")
+    _normalize_text_items(draft.checks_attempted, "checks_attempted")
+
+
+def _require_text_items(values: tuple[str, ...], field_name: str) -> None:
+    if not values:
+        raise WorkflowValidationError(f"{field_name} must not be empty.")
+    _normalize_text_items(values, field_name)
+
+
+def _normalize_text_items(
+    values: tuple[str, ...],
+    field_name: str,
+) -> tuple[str, ...]:
+    normalized = tuple(value.strip() for value in values if value.strip())
+    if len(normalized) != len(values):
+        raise WorkflowValidationError(
+            f"{field_name} must contain only non-blank values.",
+        )
+    if len(normalized) != len(set(normalized)):
+        raise WorkflowValidationError(
+            f"{field_name} must not contain duplicates.",
+        )
+    return normalized

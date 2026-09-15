@@ -6,6 +6,10 @@ from agent_team.domain.workflow.artifact import Artifact
 from agent_team.domain.workflow.development_task import DevelopmentTask
 from agent_team.domain.workflow.feature import Feature
 from agent_team.domain.workflow.feature_overview import FeatureOverview
+from agent_team.domain.workflow.task_handoff import TaskHandoff
+from agent_team.domain.workflow.task_verification_contract import (
+    TaskVerificationContract,
+)
 
 from .schemas.artifact_mcp_result import (
     ArtifactMcpResult,
@@ -18,6 +22,10 @@ from .schemas.feature_mcp_result import (
 )
 from .schemas.feature_overview_mcp_result import (
     FeatureOverviewMcpResult,
+)
+from .schemas.task_handoff_mcp_result import TaskHandoffMcpResult
+from .schemas.task_verification_contract_mcp_result import (
+    TaskVerificationContractMcpResult,
 )
 
 
@@ -71,6 +79,41 @@ def serialize_development_task(
         "status": task.status,
         "created_at": _serialize_timestamp(task.created_at),
         "updated_at": _serialize_timestamp(task.updated_at),
+        "verification_contract": serialize_task_verification_contract(
+            task.verification_contract,
+        ),
+    }
+
+
+def serialize_task_handoff(handoff: TaskHandoff) -> TaskHandoffMcpResult:
+    """Serialize a submitted task handoff for MCP structured content."""
+    return {
+        "id": handoff.id,
+        "task_id": handoff.task_id,
+        "agent_run_id": handoff.agent_run_id,
+        "submitted_by": handoff.submitted_by,
+        "attribution": handoff.attribution,
+        "implementation_summary": handoff.implementation_summary,
+        "changed_paths": list(handoff.changed_paths),
+        "reused_symbols": list(handoff.reused_symbols),
+        "new_symbols": list(handoff.new_symbols),
+        "reuse_notes": handoff.reuse_notes,
+        "checks_attempted": list(handoff.checks_attempted),
+        "limitations": handoff.limitations,
+        "next_action": handoff.next_action,
+        "created_at": _serialize_timestamp(handoff.created_at),
+    }
+
+
+def serialize_task_verification_contract(
+    contract: TaskVerificationContract | None,
+) -> TaskVerificationContractMcpResult | None:
+    """Serialize a task verification contract for MCP structured content."""
+    if contract is None:
+        return None
+    return {
+        "profile_name": contract.profile_name,
+        "required_checks": list(contract.required_checks),
     }
 
 
