@@ -18,6 +18,13 @@ env/
 .coverage.*
 coverage.xml
 htmlcov/
+allure-results/
+allure-results-raw/
+allure-report/
+allure-agent-report/
+
+# Local Node tooling used to generate Allure reports
+node_modules/
 
 # Build and packaging output
 dist/

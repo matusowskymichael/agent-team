@@ -27,6 +27,7 @@ from agent_team.infrastructure.mcp.client import (
 from agent_team.infrastructure.mcp.client.authorized_mcp_server import (
     AuthorizedMCPServer,
 )
+from tests.reporting.allure_steps import report_step
 from tests.unit.fakes.audit.fake_agent_audit_repository import (
     FakeAgentAuditRepository,
 )
@@ -156,24 +157,27 @@ class TestAuthorizedMCPServer:
 
     def test_business_analyst_cannot_create_feature(self) -> None:
         """Deny feature creation for business analysts."""
-        server = _authorized_server(DevelopmentRole.BUSINESS_ANALYST)
+        with report_step("Arrange the business analyst capability profile"):
+            server = _authorized_server(DevelopmentRole.BUSINESS_ANALYST)
 
-        denial = _denial_text(
-            server,
-            "create_feature",
-            {
-                "title": "Denied",
-                "description": "Should not reach MCP.",
-            },
-        )
+        with report_step("Attempt a denied feature mutation"):
+            denial = _denial_text(
+                server,
+                "create_feature",
+                {
+                    "title": "Denied",
+                    "description": "Should not reach MCP.",
+                },
+            )
 
-        assert _fake_delegate(server).call_count == 0
-        invocations = list(_fake_audit(server).tool_invocations.values())
-        assert len(invocations) == 1
-        assert invocations[0].status is ToolInvocationStatus.DENIED
-        assert invocations[0].tool_name == "create_feature"
-        assert "CAPABILITY_DENIED:" in denial
-        assert "cannot call create_feature" in denial
+        with report_step("Verify denial audit and zero delegated MCP calls"):
+            assert _fake_delegate(server).call_count == 0
+            invocations = list(_fake_audit(server).tool_invocations.values())
+            assert len(invocations) == 1
+            assert invocations[0].status is ToolInvocationStatus.DENIED
+            assert invocations[0].tool_name == "create_feature"
+            assert "CAPABILITY_DENIED:" in denial
+            assert "cannot call create_feature" in denial
 
     def test_business_analyst_can_add_requirements_artifact(self) -> None:
         """Allow business analysts to add requirements artifacts."""

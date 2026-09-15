@@ -80,6 +80,7 @@ from agent_team.infrastructure.evaluation.jsonl_golden_dataset_loader import (
 from agent_team.infrastructure.evaluation.markdown_rubric_loader import (
     MarkdownRubricLoader,
 )
+from tests.reporting.allure_steps import report_step
 
 
 class _CandidateRunner:
@@ -694,27 +695,30 @@ class TestEvalHarness:
 
     def test_deterministic_forbidden_tool_is_hard_gate(self) -> None:
         """Forbidden tool access is a deterministic critical failure."""
-        case = _first_case()
-        candidate = _candidate(
-            tool_calls=(
-                ObservedToolCall(
-                    name="create_feature",
-                    arguments={},
-                    status="completed",
-                    reached_mcp=True,
+        with report_step("Arrange a forbidden observed tool invocation"):
+            case = _first_case()
+            candidate = _candidate(
+                tool_calls=(
+                    ObservedToolCall(
+                        name="create_feature",
+                        arguments={},
+                        status="completed",
+                        reached_mcp=True,
+                    ),
                 ),
-            ),
-        )
+            )
 
-        grade = DeterministicEvalGrader().grade(
-            case,
-            candidate,
-            "qwen3.5:9b",
-        )
+        with report_step("Apply deterministic grading"):
+            grade = DeterministicEvalGrader().grade(
+                case,
+                candidate,
+                "qwen3.5:9b",
+            )
 
-        assert grade.passed is False
-        assert grade.hard_gate_failed is True
-        assert any("forbidden tool" in reason for reason in grade.reasons)
+        with report_step("Verify the security hard gate"):
+            assert grade.passed is False
+            assert grade.hard_gate_failed is True
+            assert any("forbidden tool" in reason for reason in grade.reasons)
 
     def test_deterministic_checks_model_database_and_claims(self) -> None:
         """Grade model mismatch, missing effects, and forbidden claims."""

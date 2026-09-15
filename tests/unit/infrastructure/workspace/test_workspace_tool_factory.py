@@ -39,6 +39,7 @@ from agent_team.infrastructure.workspace.workspace_tool_factory import (
     WORKSPACE_SERVER_NAME,
     WorkspaceToolFactory,
 )
+from tests.reporting.allure_steps import report_step
 from tests.unit.fakes.audit.fake_agent_audit_repository import (
     FakeAgentAuditRepository,
 )
@@ -227,31 +228,40 @@ class TestWorkspaceToolFactory:
         tmp_path: Path,
     ) -> None:
         """Deny unauthorized workspace mutation before executor execution."""
-        _write(tmp_path, "frontend/LoginForm.tsx", "export const A = 1\n")
-        repository = _repository_with_task(DevelopmentRole.BACKEND_DEVELOPER)
-        audit_repository = FakeAgentAuditRepository()
-        tool = _tool(
-            "apply_patch",
-            repository,
-            audit_repository,
-            DevelopmentRole.BACKEND_DEVELOPER,
-            tmp_path,
-        )
+        with report_step("Arrange a role-restricted workspace mutation"):
+            _write(
+                tmp_path,
+                "frontend/LoginForm.tsx",
+                "export const A = 1\n",
+            )
+            repository = _repository_with_task(
+                DevelopmentRole.BACKEND_DEVELOPER,
+            )
+            audit_repository = FakeAgentAuditRepository()
+            tool = _tool(
+                "apply_patch",
+                repository,
+                audit_repository,
+                DevelopmentRole.BACKEND_DEVELOPER,
+                tmp_path,
+            )
 
-        result = _invoke(
-            tool,
-            (
-                '{"path":"frontend/LoginForm.tsx","old_text":"1",'
-                '"new_text":"2"}'
-            ),
-        )
+        with report_step("Attempt the denied workspace patch"):
+            result = _invoke(
+                tool,
+                (
+                    '{"path":"frontend/LoginForm.tsx","old_text":"1",'
+                    '"new_text":"2"}'
+                ),
+            )
 
-        assert "WORKSPACE_CAPABILITY_DENIED" in str(result["error"])
-        assert (tmp_path / "frontend/LoginForm.tsx").read_text() == (
-            "export const A = 1\n"
-        )
-        invocation = audit_repository.tool_invocations[1]
-        assert invocation.status is ToolInvocationStatus.DENIED
+        with report_step("Verify denial and unchanged workspace content"):
+            assert "WORKSPACE_CAPABILITY_DENIED" in str(result["error"])
+            assert (tmp_path / "frontend/LoginForm.tsx").read_text() == (
+                "export const A = 1\n"
+            )
+            invocation = audit_repository.tool_invocations[1]
+            assert invocation.status is ToolInvocationStatus.DENIED
 
     def test_audit_start_failure_prevents_workspace_execution(
         self,

@@ -22,6 +22,7 @@ from agent_team.infrastructure.persistence.sqlite.audit import (
     sqlite_audit_schema_migrator as migrator_module,
 )
 from agent_team.interfaces.cli import audit_cli
+from tests.reporting.allure_steps import report_step
 
 
 class TestSQLiteAuditSchemaMigration:
@@ -37,34 +38,36 @@ class TestSQLiteAuditSchemaMigration:
         """Preserve legacy audit rows while adding current columns."""
         database_path = legacy_audit_database
 
-        repository = audit_repository_module.SQLiteAgentAuditRepository(
-            database_path,
-        )
-        new_run = repository.start_run(
-            AgentRunStart(
-                role=DevelopmentRole.DELIVERY_MANAGER,
-                model="qwen3.5:9b",
-                prompt_hash="new-prompt-hash",
-                prompt_excerpt="Summarize feature.",
-                max_turns=6,
-                session_id="session-new",
-                feature_id=42,
-            ),
-        )
-        completed_run = repository.complete_run(
-            run_id=new_run.id,
-            output_hash="new-output-hash",
-            output_excerpt="Summarized feature.",
-        )
+        with report_step("Migrate the legacy audit schema transactionally"):
+            repository = audit_repository_module.SQLiteAgentAuditRepository(
+                database_path,
+            )
+            new_run = repository.start_run(
+                AgentRunStart(
+                    role=DevelopmentRole.DELIVERY_MANAGER,
+                    model="qwen3.5:9b",
+                    prompt_hash="new-prompt-hash",
+                    prompt_excerpt="Summarize feature.",
+                    max_turns=6,
+                    session_id="session-new",
+                    feature_id=42,
+                ),
+            )
+            completed_run = repository.complete_run(
+                run_id=new_run.id,
+                output_hash="new-output-hash",
+                output_excerpt="Summarized feature.",
+            )
 
-        _assert_current_schema(database_path, sqlite_connection)
-        _assert_legacy_rows_were_preserved(
-            database_path,
-            sqlite_connection,
-        )
-        assert _user_version(database_path, sqlite_connection) == (
-            migrator_module.CURRENT_AUDIT_SCHEMA_VERSION
-        )
+        with report_step("Verify schema, indexes, and historical records"):
+            _assert_current_schema(database_path, sqlite_connection)
+            _assert_legacy_rows_were_preserved(
+                database_path,
+                sqlite_connection,
+            )
+            assert _user_version(database_path, sqlite_connection) == (
+                migrator_module.CURRENT_AUDIT_SCHEMA_VERSION
+            )
 
         monkeypatch.setenv(AGENT_TEAM_DB_PATH_ENV, str(database_path))
         assert audit_cli.main(["show-run", "1"]) == 0
@@ -83,12 +86,13 @@ class TestSQLiteAuditSchemaMigration:
         assert new_output.err == ""
         assert completed_run.generation_metadata is None
 
-        before = _table_counts(database_path, sqlite_connection)
-        audit_repository_module.SQLiteAgentAuditRepository(database_path)
-        assert _table_counts(database_path, sqlite_connection) == before
-        assert _user_version(database_path, sqlite_connection) == (
-            migrator_module.CURRENT_AUDIT_SCHEMA_VERSION
-        )
+        with report_step("Re-run migration and verify idempotence"):
+            before = _table_counts(database_path, sqlite_connection)
+            audit_repository_module.SQLiteAgentAuditRepository(database_path)
+            assert _table_counts(database_path, sqlite_connection) == before
+            assert _user_version(database_path, sqlite_connection) == (
+                migrator_module.CURRENT_AUDIT_SCHEMA_VERSION
+            )
 
     def test_fresh_database_receives_current_audit_schema(
         self,

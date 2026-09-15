@@ -43,6 +43,7 @@ from agent_team.domain.skills.agent_skill import AgentSkill
 from agent_team.domain.skills.agent_skill_metadata import AgentSkillMetadata
 from agent_team.domain.skills.agent_skill_name import AgentSkillName
 from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
+from tests.reporting.allure_steps import report_step
 from tests.unit.fakes.audit.fake_agent_audit_repository import (
     FakeAgentAuditRepository,
 )
@@ -227,31 +228,35 @@ class TestAgentHarness:
 
     def test_passes_role_profile_to_runtime(self) -> None:
         """Resolve the task role to an immutable runtime profile."""
-        runtime = FakeAgentRuntime(result=AgentResult(response="Done."))
-        audit_repository = FakeAgentAuditRepository()
-        harness = AgentHarness(
-            runtime=runtime,
-            audit_repository=audit_repository,
-        )
+        with report_step("Arrange trusted runtime profile and audit boundary"):
+            runtime = FakeAgentRuntime(result=AgentResult(response="Done."))
+            audit_repository = FakeAgentAuditRepository()
+            harness = AgentHarness(
+                runtime=runtime,
+                audit_repository=audit_repository,
+            )
 
-        result = asyncio.run(
-            harness.execute(
-                AgentTask(
-                    prompt="List all features.",
-                    role=DevelopmentRole.BUSINESS_ANALYST,
+        with report_step("Invoke the shared AgentHarness"):
+            result = asyncio.run(
+                harness.execute(
+                    AgentTask(
+                        prompt="List all features.",
+                        role=DevelopmentRole.BUSINESS_ANALYST,
+                    ),
                 ),
-            ),
-        )
+            )
 
-        assert result.response == "Done."
-        assert runtime.received_profile is not None
-        assert (
-            runtime.received_profile.role is DevelopmentRole.BUSINESS_ANALYST
-        )
-        assert runtime.received_run is not None
-        assert runtime.received_run.id == 1
-        assert audit_repository.runs[1].status is AgentRunStatus.COMPLETED
-        assert audit_repository.runs[1].output_excerpt == "Done."
+        with report_step("Inspect runtime dispatch and finalized audit state"):
+            assert result.response == "Done."
+            assert runtime.received_profile is not None
+            assert (
+                runtime.received_profile.role
+                is DevelopmentRole.BUSINESS_ANALYST
+            )
+            assert runtime.received_run is not None
+            assert runtime.received_run.id == 1
+            assert audit_repository.runs[1].status is AgentRunStatus.COMPLETED
+            assert audit_repository.runs[1].output_excerpt == "Done."
 
     def test_architect_preview_no_save_completes_without_tool_audit(
         self,

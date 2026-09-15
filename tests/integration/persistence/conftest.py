@@ -7,8 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.reporting.allure_steps import fixture_title
+
 
 @pytest.fixture
+@fixture_title("Create a legacy audit database")
 def legacy_audit_database(tmp_path: Path) -> Path:
     """Create a legacy audit database and close setup resources."""
     database_path = tmp_path / "workflow.db"
@@ -20,6 +23,7 @@ def legacy_audit_database(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+@fixture_title("Open managed SQLite integration connections")
 def sqlite_connection() -> Iterator[Callable[[Path], sqlite3.Connection]]:
     """Yield SQLite connections and always close them after tests."""
     connections: list[sqlite3.Connection] = []

@@ -720,3 +720,136 @@ Example output:
 ```text
 5 passed
 ```
+
+### Allure Test Reports
+
+Allure reporting is opt-in for local pytest runs. Ordinary `uv run pytest`
+does not require Node.js, the Allure CLI, network access, or a running Ollama
+service.
+
+Install the locked Python development tools and the pinned Allure Report 3
+CLI:
+
+```bash
+uv sync --locked --all-groups
+npm ci
+```
+
+Example output:
+
+```text
+Resolved and installed the locked Python environment.
+added 235 packages, and audited 236 packages
+```
+
+Collect private raw Allure results while excluding all live Ollama tests, then
+create the sanitized result directory used by every report command:
+
+```bash
+rm -rf \
+  allure-results-raw \
+  allure-results \
+  allure-report \
+  allure-agent-report
+uv run pytest \
+  -m "not ollama and not ollama_eval" \
+  --alluredir=allure-results-raw \
+  --clean-alluredir
+npm run allure:sanitize
+```
+
+The normal coverage configuration and 90% gate still apply. The generated
+`allure-results-raw/` directory is private, ephemeral input and must never be
+uploaded or used to build a shared report. The fail-closed sanitization step
+creates `allure-results/` with safe failure details, redacted textual
+attachments and parameters, environment metadata, CI executor metadata when
+applicable, and the maintained failure categories.
+
+Generate and open the human-readable Allure 3 report:
+
+```bash
+npm run allure:generate
+npm run allure:open
+```
+
+Example generation result:
+
+```text
+allure-report/index.html
+allure-report/summary.json
+allure-report/quality-gate.json
+```
+
+`npm run allure:open` starts a local report server and prints its URL. Stop it
+with `Ctrl+C`.
+
+Generate the agent-readable report and inspect its entry point:
+
+```bash
+npm run allure:agent
+sed -n '1,200p' allure-agent-report/index.md
+```
+
+The agent output includes `index.md`, per-test Markdown, and machine-readable
+files under `allure-agent-report/manifest/`. It is test evidence for coding
+agents only; runtime Agent Team agents never receive it.
+
+Apply the same Allure quality gate used in CI:
+
+```bash
+npm run allure:quality
+```
+
+The command exits non-zero when results are missing, any test failed or broke,
+or the success rate is below 100%. The original pytest exit status remains the
+authoritative test result and is independently enforced in CI.
+
+To select tests with an optional Allure test plan, create a JSON file using
+pytest's Allure full-name selector:
+
+```json
+{
+  "version": "1.0",
+  "tests": [
+    {
+      "selector": "tests.unit.application.runtime.test_agent_harness.TestAgentHarness#test_passes_role_profile_to_runtime"
+    }
+  ]
+}
+```
+
+Then run:
+
+```bash
+ALLURE_TESTPLAN_PATH=allure-testplan.json \
+  uv run pytest \
+  --alluredir=allure-results-raw \
+  --clean-alluredir
+npm run allure:sanitize
+```
+
+In GitHub Actions, open a CI workflow run and use its **Artifacts** section to
+download:
+
+- `allure-results`: sanitized adapter results and safe run metadata;
+- `allure-report`: the generated HTML report;
+- `allure-agent-report`: Markdown and manifests for coding-agent inspection.
+
+Download and open a private HTML artifact from an authenticated GitHub CLI
+session by replacing `RUN_ID` with the workflow run ID shown by GitHub:
+
+```bash
+gh run download RUN_ID -n allure-report
+npx allure open allure-report
+```
+
+For same-repository pull requests, the separate read/report job uses the
+official Allure Action to publish a pull-request summary and check. Fork pull
+requests do not receive write permissions; their test job and downloadable
+artifacts still run. The CI step summary also shows aggregate test counts,
+report generation state, and quality-gate state.
+
+Reports remain private GitHub Actions artifacts. GitHub Pages publication is
+intentionally disabled because this private repository does not have private
+Pages visibility. Artifact retention is finite and no persistent Allure
+history service is configured.
