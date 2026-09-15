@@ -1,6 +1,7 @@
 """Workflow repository port."""
 
-from typing import Protocol
+from collections.abc import Callable
+from typing import Protocol, TypeVar
 
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.workflow.artifact import Artifact
@@ -17,6 +18,8 @@ from agent_team.domain.workflow.task_verification_evidence import (
 from agent_team.domain.workflow.task_verification_result import (
     TaskVerificationResult,
 )
+
+TaskMutationResult = TypeVar("TaskMutationResult")
 
 
 class WorkflowRepository(Protocol):
@@ -101,6 +104,15 @@ class WorkflowRepository(Protocol):
         """Compare-and-set a task status transition."""
         ...
 
+    def run_task_status_locked(
+        self,
+        task_id: int,
+        required_status: TaskStatus,
+        operation: Callable[[], TaskMutationResult],
+    ) -> TaskMutationResult | None:
+        """Run an operation while the task has the required status."""
+        ...
+
     def submit_task_handoff(
         self,
         draft: TaskHandoffDraft,
@@ -114,13 +126,15 @@ class WorkflowRepository(Protocol):
         """Return the newest persisted handoff for a task, if present."""
         ...
 
-    def record_task_verification(
+    def record_task_verification(  # noqa: PLR0913, PLR0917
         self,
         task_id: int,
         submission_id: int,
         result: TaskVerificationResult,
         next_status: TaskStatus,
-    ) -> TaskVerificationEvidence:
+        required_status: TaskStatus,
+        latest_submission_id: int,
+    ) -> TaskVerificationEvidence | None:
         """Persist verification evidence and apply the resulting status."""
         ...
 

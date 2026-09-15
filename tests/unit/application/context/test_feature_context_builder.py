@@ -17,8 +17,15 @@ from agent_team.domain.workflow import (
     task_verification_failure_classification as failure_classification,
 )
 from agent_team.domain.workflow.artifact_kind import ArtifactKind
+from agent_team.domain.workflow.development_task_not_found_error import (
+    DevelopmentTaskNotFoundError,
+)
 from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_handoff import TaskHandoff
 from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
+from agent_team.domain.workflow.task_handoff_limits import (
+    DEFAULT_TASK_HANDOFF_LIMITS,
+)
 from agent_team.domain.workflow.task_status import TaskStatus
 from agent_team.domain.workflow.task_verification_outcome import (
     TaskVerificationOutcome,
@@ -104,6 +111,81 @@ class TestFeatureContextBuilder:
         assert "Build API" in context.authoritative_context
         assert "Build UI" not in context.authoritative_context
 
+    def test_explicit_developer_task_must_match_active_role(self) -> None:
+        """Reject explicit task bindings outside the role task scope."""
+        repository = FakeWorkflowRepository()
+        feature = repository.create_feature(
+            title="Checkout",
+            description="Fast checkout.",
+            status=FeatureStatus.DRAFT,
+        )
+        task = repository.create_task(
+            feature_id=feature.id,
+            title="Build UI",
+            description="Frontend UI.",
+            assigned_role=DevelopmentRole.FRONTEND_DEVELOPER,
+            status=TaskStatus.PENDING,
+        )
+
+        with pytest.raises(DevelopmentTaskNotFoundError):
+            FeatureContextBuilder(repository).build_context(
+                feature_id=feature.id,
+                role=DevelopmentRole.BACKEND_DEVELOPER,
+                session_id="backend-task-1",
+                task_id=task.id,
+            )
+
+    def test_legacy_handoff_rendering_is_bounded(self) -> None:
+        """Bound persisted handoff text when building corrective context."""
+        repository = FakeWorkflowRepository()
+        feature = repository.create_feature(
+            title="Checkout",
+            description="Fast checkout.",
+            status=FeatureStatus.DRAFT,
+        )
+        task = repository.create_task(
+            feature_id=feature.id,
+            title="Build API",
+            description="Backend API.",
+            assigned_role=DevelopmentRole.BACKEND_DEVELOPER,
+            status=TaskStatus.VERIFICATION_PENDING,
+        )
+        limits = DEFAULT_TASK_HANDOFF_LIMITS
+        repository.handoffs[1] = TaskHandoff(
+            id=1,
+            task_id=task.id,
+            agent_run_id=1,
+            submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
+            attribution="agent:backend_developer",
+            workspace_identity_hash="workspace-hash",
+            implementation_summary="x"
+            * (limits.implementation_summary_chars + 50),
+            changed_paths=tuple(
+                f"backend/path_{index}.py"
+                for index in range(limits.changed_path_count + 2)
+            ),
+            reused_symbols=(),
+            new_symbols=(),
+            reuse_notes="y" * (limits.reuse_notes_chars + 50),
+            checks_attempted=("backend",),
+            limitations="z" * (limits.limitations_chars + 50),
+            next_action="verify",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+        context = FeatureContextBuilder(repository).build_context(
+            feature_id=feature.id,
+            role=DevelopmentRole.BACKEND_DEVELOPER,
+            session_id="backend-task-1",
+            task_id=task.id,
+            workspace_identity_hash="workspace-hash",
+        )
+
+        text = context.authoritative_context
+        assert "... [truncated]" in text
+        assert "(+2 omitted)" in text
+        assert "backend/path_25.py" not in text
+
     def test_bound_developer_context_includes_resume_state(self) -> None:
         """Include exact task, handoff, and verification feedback."""
         repository = FakeWorkflowRepository()
@@ -134,6 +216,8 @@ class TestFeatureContextBuilder:
             submission_id=handoff.id,
             result=_verification_result(),
             next_status=TaskStatus.IN_PROGRESS,
+            required_status=TaskStatus.VERIFICATION_PENDING,
+            latest_submission_id=handoff.id,
         )
 
         context = FeatureContextBuilder(repository).build_context(
@@ -310,6 +394,7 @@ def _handoff_draft(task_id: int) -> TaskHandoffDraft:
         agent_run_id=1,
         submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
         attribution="agent:backend_developer",
+        workspace_identity_hash="workspace-hash",
         implementation_summary="Patched backend checkout behavior.",
         changed_paths=("src/app.py",),
         reused_symbols=("CheckoutService",),

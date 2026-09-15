@@ -7,15 +7,27 @@ from agent_team.domain.workflow.task_verification_contract import (
 
 BACKEND_VERIFICATION_PROFILE = "backend"
 FRONTEND_VERIFICATION_PROFILE = "frontend"
+BACKEND_REQUIRED_CHECKS = (
+    "backend:ruff-format",
+    "backend:ruff-check",
+    "backend:pyright",
+    "backend:pytest",
+)
+FRONTEND_REQUIRED_CHECKS = (
+    "frontend:lint",
+    "frontend:typecheck",
+    "frontend:test",
+    "frontend:build",
+)
 
 _CONTRACTS_BY_ROLE = {
     DevelopmentRole.BACKEND_DEVELOPER: TaskVerificationContract(
         profile_name=BACKEND_VERIFICATION_PROFILE,
-        required_checks=(BACKEND_VERIFICATION_PROFILE,),
+        required_checks=BACKEND_REQUIRED_CHECKS,
     ),
     DevelopmentRole.FRONTEND_DEVELOPER: TaskVerificationContract(
         profile_name=FRONTEND_VERIFICATION_PROFILE,
-        required_checks=(FRONTEND_VERIFICATION_PROFILE,),
+        required_checks=FRONTEND_REQUIRED_CHECKS,
     ),
 }
 

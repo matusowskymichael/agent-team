@@ -13,6 +13,7 @@ class TaskHandoffDraft:
     agent_run_id: int
     submitted_by: DevelopmentRole
     attribution: str
+    workspace_identity_hash: str
     implementation_summary: str
     changed_paths: tuple[str, ...]
     reused_symbols: tuple[str, ...]

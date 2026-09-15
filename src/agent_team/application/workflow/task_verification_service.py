@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agent_team.application.sessions.workspace_identity import (
+    workspace_identity_hash,
+)
 from agent_team.application.workflow.task_verifier import TaskVerifier
+from agent_team.domain.audit.agent_audit_reader import AgentAuditReader
 from agent_team.domain.workflow import (
     task_verification_failure_classification as failure_classification,
 )
@@ -32,6 +36,9 @@ from agent_team.domain.workflow.task_verification_profiles import (
 from agent_team.domain.workflow.task_verification_result import (
     TaskVerificationResult,
 )
+from agent_team.domain.workflow.task_verification_workspace_error import (
+    TaskVerificationWorkspaceError,
+)
 from agent_team.domain.workflow.workflow_repository import WorkflowRepository
 
 FailureClassification = (
@@ -45,6 +52,7 @@ class TaskVerificationService:
 
     repository: WorkflowRepository
     verifier: TaskVerifier
+    audit_reader: AgentAuditReader | None = None
 
     def verify_task(
         self,
@@ -54,6 +62,7 @@ class TaskVerificationService:
         """Verify a task waiting in verification_pending state."""
         task = self._require_task(task_id)
         handoff = self._require_handoff(task_id)
+        self._require_matching_workspace(handoff, workspace_root)
         existing = self.repository.latest_task_verification(task_id)
         if existing is not None and existing.submission_id == handoff.id:
             return existing
@@ -63,12 +72,19 @@ class TaskVerificationService:
             )
         result = self._run_verifier(task, handoff, workspace_root)
         next_status = _next_status(result.outcome)
-        return self.repository.record_task_verification(
+        evidence = self.repository.record_task_verification(
             task_id=task_id,
             submission_id=handoff.id,
             result=result,
             next_status=next_status,
+            required_status=TaskStatus.VERIFICATION_PENDING,
+            latest_submission_id=handoff.id,
         )
+        if evidence is None:
+            raise TaskTransitionError(
+                "Task verification state changed before finalization.",
+            )
+        return evidence
 
     def verify_task_if_pending(
         self,
@@ -111,6 +127,40 @@ class TaskVerificationService:
                 "Task verification configuration is missing or invalid.",
             )
         return self.verifier.verify(task, handoff, workspace_root)
+
+    def _require_matching_workspace(
+        self,
+        handoff: TaskHandoff,
+        workspace_root: Path,
+    ) -> None:
+        submitted_hash = self._submitted_workspace_identity_hash(handoff)
+        verification_hash = workspace_identity_hash(workspace_root)
+        if submitted_hash != verification_hash:
+            raise TaskVerificationWorkspaceError(
+                "Verification workspace identity does not match the "
+                "submitted handoff workspace identity.",
+            )
+
+    def _submitted_workspace_identity_hash(
+        self,
+        handoff: TaskHandoff,
+    ) -> str:
+        if (
+            handoff.workspace_identity_hash is not None
+            and handoff.workspace_identity_hash.strip()
+        ):
+            return handoff.workspace_identity_hash
+        if self.audit_reader is not None:
+            run = self.audit_reader.get_run(handoff.agent_run_id)
+            if (
+                run is not None
+                and run.workspace_identity_hash is not None
+                and run.workspace_identity_hash.strip()
+            ):
+                return run.workspace_identity_hash
+        raise TaskVerificationWorkspaceError(
+            "Task submission has no trusted workspace identity.",
+        )
 
 
 def _next_status(outcome: TaskVerificationOutcome) -> TaskStatus:

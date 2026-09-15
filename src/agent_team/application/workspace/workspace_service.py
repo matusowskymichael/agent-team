@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 
 from agent_team.domain.runtime.agent_profile import AgentProfile
 from agent_team.domain.runtime.agent_task import AgentTask
+from agent_team.domain.workflow.task_status import TaskStatus
 from agent_team.domain.workflow.workflow_repository import WorkflowRepository
 from agent_team.domain.workspace.check_run_result import CheckRunResult
 from agent_team.domain.workspace.code_search_result import CodeSearchResult
@@ -130,7 +131,21 @@ class WorkspaceService:
             path,
             mutation=True,
         )
-        return self.executor.apply_patch(path, old_text, new_text)
+        task_id = _required_task_id(task)
+        result = self.repository.run_task_status_locked(
+            task_id=task_id,
+            required_status=TaskStatus.IN_PROGRESS,
+            operation=lambda: self.executor.apply_patch(
+                path,
+                old_text,
+                new_text,
+            ),
+        )
+        if result is None:
+            raise WorkspaceAccessDeniedError(
+                "Workspace mutations require task status in_progress.",
+            )
+        return result
 
     def run_check(
         self,
@@ -200,6 +215,10 @@ class WorkspaceService:
                 f"The {profile.role.value} role cannot use task "
                 f"{task.task_id}.",
             )
+        if mutation and development_task.status is not TaskStatus.IN_PROGRESS:
+            raise WorkspaceAccessDeniedError(
+                "Workspace mutations require task status in_progress.",
+            )
         if mutation and development_task.assigned_role is not task.role:
             raise WorkspaceAccessDeniedError(
                 "Workspace mutation requires matching trusted task role.",
@@ -231,6 +250,14 @@ def _normalized_path(path: str) -> str:
     if not normalized:
         raise WorkspaceAccessDeniedError("Workspace path must not be blank.")
     return normalized
+
+
+def _required_task_id(task: AgentTask) -> int:
+    if task.task_id is None:
+        raise WorkspaceBindingError(
+            "Workspace tools require a trusted task binding.",
+        )
+    return task.task_id
 
 
 def _matches_prefix(path: str, prefix: str) -> bool:

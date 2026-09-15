@@ -2,12 +2,12 @@
 
 import json
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.workflow import (
@@ -62,6 +62,7 @@ FROM development_tasks
 """
 _STATUS_PLACEHOLDERS = "?, ?, ?, ?, ?"
 _UNMATCHED_STATUS = "__unmatched_task_status__"
+_TaskMutationResult = TypeVar("_TaskMutationResult")
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +358,19 @@ class SQLiteWorkflowRepository:
                 return None
             return _select_optional_task(connection, task_id)
 
+    def run_task_status_locked(
+        self,
+        task_id: int,
+        required_status: TaskStatus,
+        operation: Callable[[], _TaskMutationResult],
+    ) -> _TaskMutationResult | None:
+        """Run an operation while the task has the required status."""
+        with self._transaction("BEGIN IMMEDIATE") as connection:
+            task = _select_optional_task(connection, task_id)
+            if task is None or task.status is not required_status:
+                return None
+            return operation()
+
     def submit_task_handoff(
         self,
         draft: TaskHandoffDraft,
@@ -376,6 +390,7 @@ class SQLiteWorkflowRepository:
                     agent_run_id,
                     submitted_by,
                     attribution,
+                    workspace_identity_hash,
                     implementation_summary,
                     changed_paths_json,
                     reused_symbols_json,
@@ -386,13 +401,14 @@ class SQLiteWorkflowRepository:
                     next_action,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft.task_id,
                     draft.agent_run_id,
                     draft.submitted_by.value,
                     draft.attribution,
+                    draft.workspace_identity_hash,
                     draft.implementation_summary,
                     _json_text(draft.changed_paths),
                     _json_text(draft.reused_symbols),
@@ -425,6 +441,7 @@ class SQLiteWorkflowRepository:
                     agent_run_id,
                     submitted_by,
                     attribution,
+                    workspace_identity_hash,
                     implementation_summary,
                     changed_paths_json,
                     reused_symbols_json,
@@ -443,13 +460,15 @@ class SQLiteWorkflowRepository:
             ).fetchone()
             return None if row is None else _map_handoff(row)
 
-    def record_task_verification(
+    def record_task_verification(  # noqa: PLR0913, PLR0917
         self,
         task_id: int,
         submission_id: int,
         result: TaskVerificationResult,
         next_status: TaskStatus,
-    ) -> TaskVerificationEvidence:
+        required_status: TaskStatus,
+        latest_submission_id: int,
+    ) -> TaskVerificationEvidence | None:
         """Persist verification evidence and apply the resulting status."""
         timestamp_text = _format_timestamp(_utc_now())
         with self._transaction("BEGIN IMMEDIATE") as connection:
@@ -459,6 +478,19 @@ class SQLiteWorkflowRepository:
             )
             if existing is not None:
                 return existing
+            task = _select_optional_task(connection, task_id)
+            latest_handoff = _latest_task_handoff_in_transaction(
+                connection,
+                task_id,
+            )
+            if (
+                task is None
+                or task.status is not required_status
+                or latest_handoff is None
+                or latest_handoff.id != latest_submission_id
+                or submission_id != latest_submission_id
+            ):
+                return None
             cursor = connection.execute(
                 """
                 INSERT INTO task_verifications (
@@ -655,6 +687,7 @@ def _select_handoff(
                 agent_run_id,
                 submitted_by,
                 attribution,
+                workspace_identity_hash,
                 implementation_summary,
                 changed_paths_json,
                 reused_symbols_json,
@@ -672,6 +705,38 @@ def _select_handoff(
         "task handoff",
     )
     return _map_handoff(row)
+
+
+def _latest_task_handoff_in_transaction(
+    connection: sqlite3.Connection,
+    task_id: int,
+) -> TaskHandoff | None:
+    row = connection.execute(
+        """
+        SELECT
+            id,
+            task_id,
+            agent_run_id,
+            submitted_by,
+            attribution,
+            workspace_identity_hash,
+            implementation_summary,
+            changed_paths_json,
+            reused_symbols_json,
+            new_symbols_json,
+            reuse_notes,
+            checks_attempted_json,
+            limitations,
+            next_action,
+            created_at
+        FROM task_handoffs
+        WHERE task_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    return None if row is None else _map_handoff(row)
 
 
 def _select_verification(
@@ -821,6 +886,7 @@ def _map_handoff(row: sqlite3.Row) -> TaskHandoff:
         agent_run_id=int(row["agent_run_id"]),
         submitted_by=DevelopmentRole(str(row["submitted_by"])),
         attribution=str(row["attribution"]),
+        workspace_identity_hash=_optional_text(row["workspace_identity_hash"]),
         implementation_summary=str(row["implementation_summary"]),
         changed_paths=_json_tuple(str(row["changed_paths_json"])),
         reused_symbols=_json_tuple(str(row["reused_symbols_json"])),
@@ -905,6 +971,12 @@ def _json_tuple(value: str) -> tuple[str, ...]:
         raise RuntimeError("SQLite stored invalid workflow JSON.")
     items = cast("list[str]", parsed_items)
     return tuple(items)
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
 
 
 def _status_values(statuses: frozenset[TaskStatus]) -> tuple[str, ...]:

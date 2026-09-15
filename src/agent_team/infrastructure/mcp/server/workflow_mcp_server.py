@@ -35,18 +35,24 @@ from .workflow_tool_parameters import (
     ArtifactKindParameter,
     AttributionParameter,
     ChangedPathsParameter,
+    ChecksAttemptedParameter,
     CreatedByParameter,
     DescriptionParameter,
     DevelopmentRoleParameter,
     FeatureIdParameter,
     FeatureStatusParameter,
-    HandoffItemsParameter,
-    HandoffTextParameter,
     ImplementationSummaryParameter,
+    InitialTaskStatusParameter,
+    LimitationsParameter,
+    NewSymbolsParameter,
+    NextActionParameter,
     OptionalFeatureStatusParameter,
+    ReusedSymbolsParameter,
+    ReuseNotesParameter,
     TaskIdParameter,
     TaskStatusParameter,
     TitleParameter,
+    WorkspaceIdentityHashParameter,
 )
 
 SERVER_NAME = "agent-team-workflow"
@@ -226,7 +232,7 @@ def _register_task_tools(
         title: TitleParameter,
         description: DescriptionParameter,
         assigned_role: DevelopmentRoleParameter,
-        status: TaskStatusParameter = TaskStatus.PENDING,
+        status: InitialTaskStatusParameter = TaskStatus.PENDING.value,
     ) -> DevelopmentTaskMcpResult:
         """Create a task for an existing feature."""
         await _checkpoint()
@@ -282,7 +288,7 @@ def _register_task_tools(
             "for deterministic verification. Persists a structured handoff, "
             "transitions the task to verification_pending, and does not mark "
             "the task completed. Trusted runtime context supplies run ID, "
-            "role, actor attribution, and changed paths."
+            "role, actor attribution, workspace identity, and changed paths."
         ),
         structured_output=True,
     )
@@ -291,14 +297,15 @@ def _register_task_tools(
         agent_run_id: AgentRunIdParameter,
         submitted_by: DevelopmentRoleParameter,
         attribution: AttributionParameter,
+        workspace_identity_hash: WorkspaceIdentityHashParameter,
         implementation_summary: ImplementationSummaryParameter,
         changed_paths: ChangedPathsParameter,
-        reused_symbols: HandoffItemsParameter,
-        new_symbols: HandoffItemsParameter,
-        reuse_notes: HandoffTextParameter,
-        checks_attempted: HandoffItemsParameter,
-        limitations: HandoffTextParameter = "",
-        next_action: HandoffTextParameter = "run deterministic verification",
+        reused_symbols: ReusedSymbolsParameter,
+        new_symbols: NewSymbolsParameter,
+        reuse_notes: ReuseNotesParameter,
+        checks_attempted: ChecksAttemptedParameter,
+        limitations: LimitationsParameter = "",
+        next_action: NextActionParameter = "run deterministic verification",
     ) -> TaskHandoffMcpResult:
         """Submit a task handoff for deterministic verification."""
         await _checkpoint()
@@ -308,6 +315,7 @@ def _register_task_tools(
                 agent_run_id=agent_run_id,
                 submitted_by=submitted_by,
                 attribution=attribution,
+                workspace_identity_hash=workspace_identity_hash,
                 implementation_summary=implementation_summary,
                 changed_paths=_string_tuple(changed_paths),
                 reused_symbols=_string_tuple(reused_symbols),

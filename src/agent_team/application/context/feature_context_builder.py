@@ -24,6 +24,9 @@ from agent_team.domain.workflow.feature_not_found_error import (
     FeatureNotFoundError,
 )
 from agent_team.domain.workflow.task_handoff import TaskHandoff
+from agent_team.domain.workflow.task_handoff_limits import (
+    DEFAULT_TASK_HANDOFF_LIMITS,
+)
 from agent_team.domain.workflow.task_verification_evidence import (
     TaskVerificationEvidence,
 )
@@ -193,6 +196,13 @@ class FeatureContextBuilder:
                 raise DevelopmentTaskNotFoundError(
                     f"Development task {task_id} was not found.",
                 )
+            if (
+                not policy.include_all_tasks
+                and task.assigned_role not in policy.task_roles
+            ):
+                raise DevelopmentTaskNotFoundError(
+                    f"Development task {task_id} was not found.",
+                )
             return (task,)
         if not policy.include_all_tasks and not policy.task_roles:
             return ()
@@ -223,10 +233,6 @@ def _render_context(render_input: FeatureContextRenderInput) -> str:
         f"Feature created_at: {_timestamp(feature.created_at)}",
         f"Feature updated_at: {_timestamp(feature.updated_at)}",
         f"Bound task ID: {_optional_int(render_input.task_id)}",
-        (
-            "Workspace identity hash: "
-            f"{_optional_text(render_input.workspace_identity_hash)}"
-        ),
         "",
         "Artifacts included by role policy:",
     ]
@@ -308,21 +314,52 @@ def _append_handoff(
     if handoff is None:
         lines.append("- not requested or no handoff exists for this task")
         return
+    limits = DEFAULT_TASK_HANDOFF_LIMITS
+    changed_paths = _bounded_items(
+        handoff.changed_paths,
+        limits.changed_path_count,
+    )
+    summary = _bounded_text(
+        handoff.implementation_summary,
+        limits.implementation_summary_chars,
+    )
+    reused_symbols = _bounded_items(
+        handoff.reused_symbols,
+        limits.reused_symbol_count,
+    )
+    new_symbols = _bounded_items(
+        handoff.new_symbols,
+        limits.new_symbol_count,
+    )
+    reuse_notes = _bounded_text(
+        handoff.reuse_notes,
+        limits.reuse_notes_chars,
+    )
+    checks_attempted = _bounded_items(
+        handoff.checks_attempted,
+        limits.checks_attempted_count,
+    )
+    limitations = (
+        _bounded_text(handoff.limitations, limits.limitations_chars) or "none"
+    )
+    next_action = _bounded_text(
+        handoff.next_action,
+        limits.next_action_chars,
+    )
     lines.extend(
         (
             f"- handoff_id: {handoff.id}",
             f"  agent_run_id: {handoff.agent_run_id}",
             f"  submitted_by: {handoff.submitted_by.value}",
-            f"  changed_paths: {', '.join(handoff.changed_paths) or 'none'}",
+            f"  changed_paths: {changed_paths}",
             "  implementation_summary:",
-            f"  {handoff.implementation_summary}",
-            f"  reuse_notes: {handoff.reuse_notes}",
-            (
-                "  checks_attempted: "
-                f"{', '.join(handoff.checks_attempted) or 'none'}"
-            ),
-            f"  limitations: {handoff.limitations or 'none'}",
-            f"  next_action: {handoff.next_action}",
+            f"  {summary}",
+            f"  reused_symbols: {reused_symbols}",
+            f"  new_symbols: {new_symbols}",
+            f"  reuse_notes: {reuse_notes}",
+            f"  checks_attempted: {checks_attempted}",
+            f"  limitations: {limitations}",
+            f"  next_action: {next_action}",
             f"  created_at: {_timestamp(handoff.created_at)}",
         ),
     )
@@ -376,12 +413,6 @@ def _optional_int(value: int | None) -> str:
     return str(value)
 
 
-def _optional_text(value: str | None) -> str:
-    if value is None:
-        return "-"
-    return value
-
-
 def _verification_contract(task: DevelopmentTask) -> str:
     contract = task.verification_contract
     if contract is None:
@@ -390,3 +421,25 @@ def _verification_contract(task: DevelopmentTask) -> str:
         f"profile={contract.profile_name}; "
         f"required_checks={', '.join(contract.required_checks)}"
     )
+
+
+def _bounded_items(values: tuple[str, ...], max_count: int) -> str:
+    limits = DEFAULT_TASK_HANDOFF_LIMITS
+    if not values:
+        return "none"
+    shown = tuple(
+        _bounded_text(value, limits.item_chars) for value in values[:max_count]
+    )
+    joined = ", ".join(shown)
+    omitted = len(values) - max_count
+    if omitted > 0:
+        return f"{joined} (+{omitted} omitted)"
+    return joined
+
+
+def _bounded_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    suffix = "... [truncated]"
+    prefix_length = max(0, max_chars - len(suffix))
+    return f"{value[:prefix_length]}{suffix}"

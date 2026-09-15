@@ -18,6 +18,9 @@ from agent_team.domain.workflow.task_active_slot_conflict_error import (
     TaskActiveSlotConflictError,
 )
 from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
+from agent_team.domain.workflow.task_handoff_limits import (
+    DEFAULT_TASK_HANDOFF_LIMITS,
+)
 from agent_team.domain.workflow.task_status import TaskStatus
 from agent_team.domain.workflow.task_transition_error import (
     TaskTransitionError,
@@ -168,6 +171,24 @@ class TestWorkflowService:
         assert "assigned_role" in str(error.value)
         assert "backend_developer" in str(error.value)
 
+    def test_create_task_rejects_verification_pending_status(self) -> None:
+        """Reject direct creation in verification-only lifecycle states."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature(
+            title="Feature",
+            description="Description",
+        )
+
+        with pytest.raises(WorkflowValidationError, match="Initial task"):
+            service.create_task(
+                feature_id=feature.id,
+                title="Task",
+                description="Description",
+                assigned_role=DevelopmentRole.BACKEND_DEVELOPER,
+                status=TaskStatus.VERIFICATION_PENDING,
+            )
+
     def test_list_artifacts_requires_existing_feature(self) -> None:
         """Reject listing artifacts for missing features."""
         service = WorkflowService(repository=FakeWorkflowRepository())
@@ -200,7 +221,7 @@ class TestWorkflowService:
         repository = FakeWorkflowRepository()
         service = WorkflowService(repository=repository)
         feature = service.create_feature("Feature", "Description")
-        task = service.create_task(
+        task = repository.create_task(
             feature.id,
             "Task",
             "Description",
@@ -230,7 +251,7 @@ class TestWorkflowService:
         repository = FakeWorkflowRepository()
         service = WorkflowService(repository=repository)
         feature = service.create_feature("Feature", "Description")
-        task = service.create_task(
+        task = repository.create_task(
             feature.id,
             "Task",
             "Description",
@@ -309,6 +330,115 @@ class TestWorkflowService:
         with pytest.raises(TaskVerificationConfigurationError):
             service.submit_task_for_verification(_handoff_draft(task.id))
 
+    def test_submit_accepts_handoff_at_exact_field_boundaries(self) -> None:
+        """Accept values exactly at individual handoff field limits."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        service.update_task_status(task.id, TaskStatus.IN_PROGRESS)
+        limits = DEFAULT_TASK_HANDOFF_LIMITS
+
+        handoff = service.submit_task_for_verification(
+            replace(
+                _handoff_draft(task.id),
+                implementation_summary=(
+                    "s" * limits.implementation_summary_chars
+                ),
+                reuse_notes="r" * limits.reuse_notes_chars,
+                limitations="l" * limits.limitations_chars,
+                next_action="n" * limits.next_action_chars,
+                changed_paths=("p" * limits.item_chars,),
+                reused_symbols=("r" * limits.item_chars,),
+                new_symbols=("n" * limits.item_chars,),
+                checks_attempted=("c" * limits.item_chars,),
+            ),
+        )
+
+        assert len(handoff.implementation_summary) == (
+            limits.implementation_summary_chars
+        )
+
+    def test_submit_rejects_handoff_over_text_boundary(self) -> None:
+        """Reject handoff text beyond an individual field limit."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        service.update_task_status(task.id, TaskStatus.IN_PROGRESS)
+        limits = DEFAULT_TASK_HANDOFF_LIMITS
+        oversized = replace(
+            _handoff_draft(task.id),
+            implementation_summary=(
+                "s" * (limits.implementation_summary_chars + 1)
+            ),
+        )
+
+        with pytest.raises(
+            WorkflowValidationError,
+            match="implementation_summary",
+        ):
+            service.submit_task_for_verification(oversized)
+
+    def test_submit_rejects_oversized_handoff(self) -> None:
+        """Bound persisted handoff fields before storage."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        service.update_task_status(task.id, TaskStatus.IN_PROGRESS)
+        limits = DEFAULT_TASK_HANDOFF_LIMITS
+        oversized = replace(
+            _handoff_draft(task.id),
+            changed_paths=tuple(
+                f"src/file_{index}.py"
+                for index in range(limits.changed_path_count + 1)
+            ),
+        )
+
+        with pytest.raises(WorkflowValidationError, match="changed_paths"):
+            service.submit_task_for_verification(oversized)
+
+    def test_submit_rejects_total_handoff_size_over_limit(self) -> None:
+        """Reject collectively large handoffs inside individual limits."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository=repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        service.update_task_status(task.id, TaskStatus.IN_PROGRESS)
+        limits = DEFAULT_TASK_HANDOFF_LIMITS
+        oversized = replace(
+            _handoff_draft(task.id),
+            implementation_summary=("s" * limits.implementation_summary_chars),
+            changed_paths=tuple(
+                f"src/{index:02d}/" + ("p" * (limits.item_chars - 7))
+                for index in range(limits.changed_path_count)
+            ),
+        )
+
+        with pytest.raises(WorkflowValidationError, match="total accepted"):
+            service.submit_task_for_verification(oversized)
+
 
 def _handoff_draft(task_id: int) -> TaskHandoffDraft:
     return TaskHandoffDraft(
@@ -316,6 +446,7 @@ def _handoff_draft(task_id: int) -> TaskHandoffDraft:
         agent_run_id=1,
         submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
         attribution="agent:backend_developer",
+        workspace_identity_hash="workspace-hash",
         implementation_summary="Patched the assigned backend behavior.",
         changed_paths=("src/app.py",),
         reused_symbols=("ExistingService",),

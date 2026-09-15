@@ -61,6 +61,9 @@ from agent_team.infrastructure.evaluation.eval_hashes import hash_text_value
 from agent_team.infrastructure.evaluation.evaluation_context_provider import (
     EvaluationContextProvider,
 )
+from agent_team.infrastructure.evaluation.evaluation_task_verifier import (
+    EvaluationTaskVerifier,
+)
 from agent_team.infrastructure.mcp.client import (
     development_workflow_mcp_process_options as mcp_process_options,
 )
@@ -89,9 +92,6 @@ from agent_team.infrastructure.skills.agent_skill_tool_factory import (
 )
 from agent_team.infrastructure.skills.filesystem_agent_skill_catalog import (
     FilesystemAgentSkillCatalog,
-)
-from agent_team.infrastructure.workspace.local_task_verifier import (
-    LocalTaskVerifier,
 )
 from agent_team.infrastructure.workspace.local_workspace_executor import (
     LocalWorkspaceExecutor,
@@ -226,7 +226,7 @@ def _orchestrator(
             repository=workflow_repository,
             executor=LocalWorkspaceExecutor(
                 root=workspace_root,
-                check_commands=_evaluation_check_commands(),
+                check_commands=_evaluation_workspace_check_commands(),
             ),
         ),
         audit_repository=audit_repository,
@@ -261,7 +261,10 @@ def _orchestrator(
         agent_executor=AgentHarness(
             runtime=runtime,
             audit_repository=audit_repository,
-            session_service=AgentSessionService(session_repository),
+            session_service=AgentSessionService(
+                repository=session_repository,
+                workflow_repository=workflow_repository,
+            ),
             context_provider=EvaluationContextProvider(
                 repository=workflow_repository,
                 context_policy=case.context_policy,
@@ -269,14 +272,8 @@ def _orchestrator(
             skill_service=skill_service,
             task_verification_service=TaskVerificationService(
                 repository=workflow_repository,
-                verifier=LocalTaskVerifier(
-                    executor_factory=lambda workspace_root: (
-                        LocalWorkspaceExecutor(
-                            root=workspace_root,
-                            check_commands=_evaluation_check_commands(),
-                        )
-                    ),
-                ),
+                verifier=EvaluationTaskVerifier(case),
+                audit_reader=audit_repository,
             ),
         ),
     )
@@ -365,7 +362,7 @@ def _workspace_root(case: EvalCase, workspace_root: Path) -> Path | None:
     return None
 
 
-def _evaluation_check_commands() -> dict[str, tuple[str, ...]]:
+def _evaluation_workspace_check_commands() -> dict[str, tuple[str, ...]]:
     return {
         "backend": (sys.executable, "-c", "pass"),
         "frontend": (sys.executable, "-c", "pass"),

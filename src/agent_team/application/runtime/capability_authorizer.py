@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import NoReturn
 
+from agent_team.application.workflow.workflow_service import (
+    INITIAL_TASK_STATUSES,
+)
 from agent_team.domain.runtime.agent_profile import AgentProfile
 from agent_team.domain.runtime.capability_denied_error import (
     CapabilityDeniedError,
@@ -169,6 +172,28 @@ class CapabilityAuthorizer:
         _validate_bound_feature_id(profile, feature_id, bound_feature_id)
         assigned_role = _require_development_role(arguments, "assigned_role")
         task_status = _optional_task_status(arguments)
+        if (
+            profile.role is DevelopmentRole.SOFTWARE_ARCHITECT
+            and task_status is not None
+            and task_status is not TaskStatus.PENDING
+        ):
+            _deny(
+                "The software_architect role must create tasks with the "
+                "default pending status.",
+            )
+        if task_status is not None and task_status not in (
+            INITIAL_TASK_STATUSES
+        ):
+            valid_values = ", ".join(
+                status.value
+                for status in TaskStatus
+                if status in INITIAL_TASK_STATUSES
+            )
+            _deny(
+                "Initial task status must be one of: "
+                f"{valid_values}. Use submit_task_for_verification to enter "
+                "verification_pending.",
+            )
         if profile.role is DevelopmentRole.DELIVERY_MANAGER:
             return
         if profile.role is not DevelopmentRole.SOFTWARE_ARCHITECT:
@@ -180,11 +205,6 @@ class CapabilityAuthorizer:
             _deny(
                 "The software_architect role cannot assign tasks to "
                 f"{assigned_role.value}.",
-            )
-        if task_status is not None and task_status is not TaskStatus.PENDING:
-            _deny(
-                "The software_architect role must create tasks with the "
-                "default pending status.",
             )
 
     def _authorize_update_task_status(

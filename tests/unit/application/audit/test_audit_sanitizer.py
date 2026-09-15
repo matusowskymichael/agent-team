@@ -9,6 +9,7 @@ from agent_team.application.audit.audit_sanitizer import (
     omit_hidden_reasoning,
     sanitize_text,
     sanitize_tool_arguments,
+    sanitize_tool_result,
 )
 
 
@@ -125,3 +126,44 @@ class TestAuditSanitizer:
         assert parsed["description_length"] == len(description)
         assert "description" not in parsed
         assert description not in preview
+
+    def test_patch_result_preview_keeps_parseable_path(self) -> None:
+        """Preserve successful patch result paths despite long JSON."""
+        long_path = "backend/" + ("nested/" * 40) + "auth.py"
+
+        _hash, preview = sanitize_tool_result(
+            "apply_patch",
+            {
+                "path": long_path,
+                "applied": True,
+                "before_hash": "before",
+                "after_hash": "after",
+                "line_count_delta": 1,
+                "message": "patch applied",
+            },
+        )
+
+        parsed = json.loads(preview)
+        assert parsed["path"] == long_path
+        assert parsed["applied"] is True
+        assert len(parsed["path"]) > MAX_AUDIT_EXCERPT_LENGTH
+
+    def test_patch_arguments_do_not_store_raw_patch_contents(self) -> None:
+        """Hash patch content instead of storing old or new text."""
+        _hash, preview = sanitize_tool_arguments(
+            "apply_patch",
+            {
+                "path": "backend/auth.py",
+                "old_text": "password = 'old-secret'",
+                "new_text": "password = 'new-secret'",
+            },
+        )
+
+        parsed = json.loads(preview)
+        assert parsed["path"] == "backend/auth.py"
+        assert parsed["old_text_length"] == len("password = 'old-secret'")
+        assert parsed["new_text_length"] == len("password = 'new-secret'")
+        assert "old_text_hash" in parsed
+        assert "new_text_hash" in parsed
+        assert "old-secret" not in preview
+        assert "new-secret" not in preview

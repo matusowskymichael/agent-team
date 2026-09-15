@@ -220,6 +220,7 @@ class FakeAgentAuditRepository:
         task: AgentTask | None = None,
         role: DevelopmentRole = DevelopmentRole.DELIVERY_MANAGER,
         feature_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentRunRecord:
         """Create a started run for tool-invocation tests."""
         prompt = "Test prompt." if task is None else task.prompt
@@ -233,7 +234,7 @@ class FakeAgentAuditRepository:
                 session_id=None,
                 feature_id=feature_id,
                 task_id=None if task is None else task.task_id,
-                workspace_identity_hash=None,
+                workspace_identity_hash=workspace_identity_hash,
             ),
         )
 

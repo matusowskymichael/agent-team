@@ -15,6 +15,9 @@ from agent_team.application.runtime.agent_harness import AgentHarness
 from agent_team.application.sessions.agent_session_service import (
     AgentSessionService,
 )
+from agent_team.application.sessions.workspace_identity import (
+    workspace_identity_hash,
+)
 from agent_team.application.workflow.task_verification_service import (
     TaskVerificationService,
 )
@@ -41,6 +44,9 @@ from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
 from agent_team.domain.workflow.task_status import TaskStatus
 from agent_team.domain.workflow.task_verification_outcome import (
     TaskVerificationOutcome,
+)
+from agent_team.domain.workflow.task_verification_profiles import (
+    BACKEND_REQUIRED_CHECKS,
 )
 from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 from agent_team.infrastructure.persistence.sqlite.audit import (
@@ -132,7 +138,7 @@ class _LifecycleRuntime:
             _RecordedTool(
                 tool_name=WorkspaceToolName.APPLY_PATCH.value,
                 arguments={"path": patch.path},
-                result={"applied": patch.applied},
+                result={"applied": patch.applied, "path": patch.path},
                 server_name="workspace",
             ),
         )
@@ -154,6 +160,9 @@ class _LifecycleRuntime:
                 agent_run_id=run.id,
                 submitted_by=profile.role,
                 attribution=f"agent:{profile.role.value}",
+                workspace_identity_hash=workspace_identity_hash(
+                    task.workspace_root,
+                ),
                 implementation_summary="Extended AuthService.logout.",
                 changed_paths=(patch.path,),
                 reused_symbols=("AuthService.logout",),
@@ -213,7 +222,9 @@ class TestVerifiedTaskLifecycleIntegration:
         assert handoff.changed_paths == ("backend/auth.py",)
         assert evidence is not None
         assert evidence.outcome is TaskVerificationOutcome.PASSED
-        assert evidence.checks[0].name == "backend"
+        assert tuple(check.name for check in evidence.checks) == (
+            BACKEND_REQUIRED_CHECKS
+        )
         assert "Verification result: passed" in result.response
         assert run.task_id == task_id
         assert run.workspace_identity_hash is not None
@@ -271,7 +282,8 @@ class TestVerifiedTaskLifecycleIntegration:
             runtime=runtime,
             audit_repository=audit_repository,
             session_service=AgentSessionService(
-                SessionRepository(database_path),
+                repository=SessionRepository(database_path),
+                workflow_repository=workflow_repository,
             ),
             context_provider=FeatureContextBuilder(workflow_repository),
         )
@@ -291,6 +303,7 @@ class TestVerifiedTaskLifecycleIntegration:
                     check_commands=_passing_checks(),
                 ),
             ),
+            audit_reader=audit_repository,
         )
         first_evidence = verifier.verify_task(task_id, workspace_root)
         second_evidence = verifier.verify_task(task_id, workspace_root)
@@ -318,7 +331,8 @@ def _harness(
         ),
         audit_repository=audit_repository,
         session_service=AgentSessionService(
-            SessionRepository(workflow_repository.database_path),
+            repository=SessionRepository(workflow_repository.database_path),
+            workflow_repository=workflow_repository,
         ),
         context_provider=FeatureContextBuilder(workflow_repository),
         task_verification_service=TaskVerificationService(
@@ -329,6 +343,7 @@ def _harness(
                     check_commands=verification_commands,
                 ),
             ),
+            audit_reader=audit_repository,
         ),
     )
 
@@ -380,11 +395,20 @@ def _agent_task(task_id: int, workspace_root: Path) -> AgentTask:
 
 
 def _passing_checks() -> dict[str, tuple[str, ...]]:
-    return {"backend": (sys.executable, "-c", "pass")}
+    pass_command = (sys.executable, "-c", "pass")
+    return {
+        "backend": pass_command,
+        **dict.fromkeys(BACKEND_REQUIRED_CHECKS, pass_command),
+    }
 
 
 def _failing_checks() -> dict[str, tuple[str, ...]]:
-    return {"backend": (sys.executable, "-c", "raise SystemExit(1)")}
+    pass_command = (sys.executable, "-c", "pass")
+    fail_command = (sys.executable, "-c", "raise SystemExit(1)")
+    return {
+        "backend": pass_command,
+        **dict.fromkeys(BACKEND_REQUIRED_CHECKS, fail_command),
+    }
 
 
 def _record_tool(

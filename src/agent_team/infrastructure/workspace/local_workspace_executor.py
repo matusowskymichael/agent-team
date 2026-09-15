@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -76,6 +77,7 @@ ALLOWED_CHECK_EXECUTABLES = frozenset(
     {
         "python",
         "python3",
+        "npm",
         "uv",
         "pytest",
         "ruff",
@@ -123,8 +125,26 @@ JAVASCRIPT_NON_METHOD_NAMES = frozenset(
 
 def _default_check_commands() -> dict[str, tuple[str, ...]]:
     return {
-        "backend": ("uv", "run", "pytest"),
-        "frontend": ("uv", "run", "pytest"),
+        "backend": (
+            sys.executable,
+            "-m",
+            "agent_team.infrastructure.workspace.workspace_check_profile_runner",
+            "backend",
+        ),
+        "backend:ruff-format": ("uv", "run", "ruff", "format", "--check", "."),
+        "backend:ruff-check": ("uv", "run", "ruff", "check", "."),
+        "backend:pyright": ("uv", "run", "pyright"),
+        "backend:pytest": ("uv", "run", "pytest"),
+        "frontend": (
+            sys.executable,
+            "-m",
+            "agent_team.infrastructure.workspace.workspace_check_profile_runner",
+            "frontend",
+        ),
+        "frontend:lint": ("npm", "run", "lint"),
+        "frontend:typecheck": ("npm", "run", "typecheck"),
+        "frontend:test": ("npm", "run", "test"),
+        "frontend:build": ("npm", "run", "build"),
         "pytest": ("uv", "run", "pytest"),
         "ruff": ("uv", "run", "ruff", "check", "."),
         "pyright": ("uv", "run", "pyright"),

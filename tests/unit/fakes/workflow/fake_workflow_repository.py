@@ -1,7 +1,9 @@
 """Fake workflow repository for unit tests."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import TypeVar
 
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.workflow.artifact import Artifact
@@ -24,6 +26,8 @@ from agent_team.domain.workflow.task_verification_profiles import (
 from agent_team.domain.workflow.task_verification_result import (
     TaskVerificationResult,
 )
+
+_TaskMutationResult = TypeVar("_TaskMutationResult")
 
 
 def _feature_store() -> dict[int, Feature]:
@@ -219,6 +223,18 @@ class FakeWorkflowRepository:
             return None
         return self.update_task_status(task_id, to_status)
 
+    def run_task_status_locked(
+        self,
+        task_id: int,
+        required_status: TaskStatus,
+        operation: Callable[[], _TaskMutationResult],
+    ) -> _TaskMutationResult | None:
+        """Run an operation when the task has the required status."""
+        task = self.tasks.get(task_id)
+        if task is None or task.status is not required_status:
+            return None
+        return operation()
+
     def submit_task_handoff(
         self,
         draft: TaskHandoffDraft,
@@ -236,6 +252,7 @@ class FakeWorkflowRepository:
             agent_run_id=draft.agent_run_id,
             submitted_by=draft.submitted_by,
             attribution=draft.attribution,
+            workspace_identity_hash=draft.workspace_identity_hash,
             implementation_summary=draft.implementation_summary,
             changed_paths=draft.changed_paths,
             reused_symbols=draft.reused_symbols,
@@ -262,14 +279,36 @@ class FakeWorkflowRepository:
             return None
         return max(handoffs, key=lambda handoff: handoff.id)
 
-    def record_task_verification(
+    def record_task_verification(  # noqa: PLR0913, PLR0917
         self,
         task_id: int,
         submission_id: int,
         result: TaskVerificationResult,
         next_status: TaskStatus,
-    ) -> TaskVerificationEvidence:
+        required_status: TaskStatus,
+        latest_submission_id: int,
+    ) -> TaskVerificationEvidence | None:
         """Persist verification evidence and apply the resulting status."""
+        existing = next(
+            (
+                verification
+                for verification in self.verifications.values()
+                if verification.submission_id == submission_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        task = self.tasks.get(task_id)
+        latest_handoff = self.latest_task_handoff(task_id)
+        if (
+            task is None
+            or task.status is not required_status
+            or latest_handoff is None
+            or latest_handoff.id != latest_submission_id
+            or submission_id != latest_submission_id
+        ):
+            return None
         verification_id = self.next_verification_id
         checks: list[TaskVerificationCheck] = []
         for check_result in result.checks:

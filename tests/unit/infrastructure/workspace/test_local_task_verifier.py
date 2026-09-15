@@ -1,6 +1,7 @@
 """Tests for the local deterministic task verifier."""
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -17,6 +18,9 @@ from agent_team.domain.workflow.task_verification_contract import (
 )
 from agent_team.domain.workflow.task_verification_outcome import (
     TaskVerificationOutcome,
+)
+from agent_team.domain.workflow.task_verification_profiles import (
+    BACKEND_REQUIRED_CHECKS,
 )
 from agent_team.domain.workspace.check_run_result import CheckRunResult
 from agent_team.domain.workspace.workspace_access_denied_error import (
@@ -53,7 +57,7 @@ class _FakeExecutor:
         self.received_names.append(name)
         if self.error is not None:
             raise self.error
-        return self.result
+        return replace(self.result, name=name)
 
 
 class TestLocalTaskVerifier:
@@ -69,7 +73,7 @@ class TestLocalTaskVerifier:
         assert result.outcome is TaskVerificationOutcome.PASSED
         assert result.failure_classification is (FailureClassification.NONE)
         assert result.checks[0].stdout_hash
-        assert executor.received_names == ["backend"]
+        assert executor.received_names == list(BACKEND_REQUIRED_CHECKS)
 
     def test_failed_check_returns_check_failed(self) -> None:
         """Return failed verification when a check exits non-zero."""
@@ -166,7 +170,7 @@ def _task(
         created_at=timestamp,
         updated_at=timestamp,
         verification_contract=contract
-        or TaskVerificationContract("backend", ("backend",)),
+        or TaskVerificationContract("backend", BACKEND_REQUIRED_CHECKS),
     )
 
 
@@ -178,6 +182,7 @@ def _handoff() -> TaskHandoff:
         agent_run_id=1,
         submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
         attribution="agent:backend_developer",
+        workspace_identity_hash="workspace-hash",
         implementation_summary="Implemented.",
         changed_paths=("src/app.py",),
         reused_symbols=("ExistingService",),

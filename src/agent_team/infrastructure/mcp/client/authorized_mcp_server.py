@@ -47,6 +47,7 @@ TRUSTED_SUBMISSION_ARGUMENTS = frozenset(
         "submitted_by",
         "attribution",
         "changed_paths",
+        "workspace_identity_hash",
     },
 )
 CAPABILITY_DENIED_PREFIX = "CAPABILITY_DENIED"
@@ -149,6 +150,10 @@ class AuthorizedMCPServer(MCPServer):
                 bound_feature_id=self.run.feature_id,
                 bound_task_id=self.bound_task_id,
             )
+            delegated_arguments = self._delegated_arguments(
+                tool_name,
+                arguments,
+            )
         except CapabilityDeniedError as error:
             self._record_denial(
                 tool_name=tool_name,
@@ -158,10 +163,6 @@ class AuthorizedMCPServer(MCPServer):
             )
             return _capability_denied_result(error)
 
-        delegated_arguments = self._delegated_arguments(
-            tool_name,
-            arguments,
-        )
         arguments_hash, arguments_preview = sanitize_tool_arguments(
             tool_name,
             delegated_arguments,
@@ -277,6 +278,9 @@ class AuthorizedMCPServer(MCPServer):
             delegated_arguments["submitted_by"] = self.profile.role.value
             delegated_arguments["attribution"] = _trusted_actor(self.profile)
             delegated_arguments["changed_paths"] = self._changed_paths()
+            delegated_arguments["workspace_identity_hash"] = (
+                self._workspace_identity_hash()
+            )
             return delegated_arguments
 
         if tool_name != WorkflowToolName.ADD_ARTIFACT.value:
@@ -300,12 +304,17 @@ class AuthorizedMCPServer(MCPServer):
                 continue
             if invocation.status is not ToolInvocationStatus.COMPLETED:
                 continue
-            if not _result_applied(invocation.result_preview):
-                continue
-            path = _path_from_arguments(invocation.arguments_preview_json)
+            path = _path_from_successful_result(invocation.result_preview)
             if path is not None:
                 paths.add(path)
         return sorted(paths)
+
+    def _workspace_identity_hash(self) -> str:
+        if self.run.workspace_identity_hash is not None:
+            return self.run.workspace_identity_hash
+        raise CapabilityDeniedError(
+            "Task submission requires a trusted workspace identity.",
+        )
 
     async def list_prompts(self) -> ListPromptsResult:
         """List prompts from the delegate server."""
@@ -400,31 +409,19 @@ def _capability_denied_message(error: CapabilityDeniedError) -> str:
     )
 
 
-def _path_from_arguments(arguments_preview_json: str) -> str | None:
+def _path_from_successful_result(result_preview: str | None) -> str | None:
+    if result_preview is None:
+        return None
     try:
-        parsed: object = json.loads(arguments_preview_json)
+        parsed: object = json.loads(result_preview)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict):
         return None
     parsed_mapping = cast("dict[str, object]", parsed)
     path = parsed_mapping.get("path")
+    if parsed_mapping.get("applied") is not True:
+        return None
     if not isinstance(path, str) or not path.strip():
         return None
     return path
-
-
-def _result_applied(result_preview: str | None) -> bool:
-    if result_preview is None:
-        return False
-    try:
-        parsed: object = json.loads(result_preview)
-    except json.JSONDecodeError:
-        return (
-            '"applied":true' in result_preview
-            or '"applied": true' in result_preview
-        )
-    if not isinstance(parsed, dict):
-        return False
-    parsed_mapping = cast("dict[str, object]", parsed)
-    return parsed_mapping.get("applied") is True

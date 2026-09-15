@@ -75,6 +75,9 @@ from agent_team.domain.workflow.task_transition_error import (
 from agent_team.domain.workflow.task_verification_evidence import (
     TaskVerificationEvidence,
 )
+from agent_team.domain.workflow.task_verification_workspace_error import (
+    TaskVerificationWorkspaceError,
+)
 from agent_team.domain.workspace.workspace_access_denied_error import (
     WorkspaceAccessDeniedError,
 )
@@ -205,6 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sqlite_workflow_migration_error.SQLiteWorkflowMigrationError,
         TaskSubmissionError,
         TaskTransitionError,
+        TaskVerificationWorkspaceError,
         WorkflowMCPUnavailableError,
         WorkspaceAccessDeniedError,
         WorkspaceBindingError,
@@ -268,7 +272,10 @@ def build_orchestrator(settings: OllamaSettings | None = None) -> Orchestrator:
         agent_executor=AgentHarness(
             runtime=runtime,
             audit_repository=audit_repository,
-            session_service=AgentSessionService(session_repository),
+            session_service=AgentSessionService(
+                repository=session_repository,
+                workflow_repository=workflow_repository,
+            ),
             context_provider=FeatureContextBuilder(workflow_repository),
             skill_service=skill_service,
             task_verification_service=TaskVerificationService(
@@ -276,6 +283,7 @@ def build_orchestrator(settings: OllamaSettings | None = None) -> Orchestrator:
                 verifier=LocalTaskVerifier(
                     executor_factory=LocalWorkspaceExecutor,
                 ),
+                audit_reader=audit_repository,
             ),
         ),
     )
@@ -297,6 +305,9 @@ def build_task_verification_service(
         repository=workflow_repository,
         verifier=LocalTaskVerifier(
             executor_factory=LocalWorkspaceExecutor,
+        ),
+        audit_reader=audit_repository_module.SQLiteAgentAuditRepository(
+            resolved_database_path,
         ),
     )
 

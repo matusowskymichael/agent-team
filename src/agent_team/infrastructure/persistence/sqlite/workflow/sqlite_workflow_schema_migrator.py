@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS task_handoffs (
     agent_run_id INTEGER NOT NULL,
     submitted_by TEXT NOT NULL,
     attribution TEXT NOT NULL,
+    workspace_identity_hash TEXT,
     implementation_summary TEXT NOT NULL,
     changed_paths_json TEXT NOT NULL,
     reused_symbols_json TEXT NOT NULL,
@@ -106,6 +107,7 @@ _DEVELOPMENT_TASK_CONTRACT_COLUMNS = (
     ("verification_profile", "TEXT"),
     ("required_checks_json", "TEXT"),
 )
+_TASK_HANDOFF_PROVENANCE_COLUMNS = (("workspace_identity_hash", "TEXT"),)
 
 _INDEXES_SQL = (
     """
@@ -154,6 +156,7 @@ class SQLiteWorkflowSchemaMigrator:
             connection.execute("BEGIN")
             self._ensure_base_tables(connection)
             self._ensure_task_contract_columns(connection)
+            self._ensure_task_handoff_provenance_columns(connection)
             self._create_indexes(connection)
             connection.commit()
         except sqlite3.Error as error:
@@ -183,6 +186,19 @@ class SQLiteWorkflowSchemaMigrator:
             if column_name not in columns:
                 connection.execute(
                     "ALTER TABLE development_tasks "
+                    f"ADD COLUMN {column_name} {column_type}",
+                )
+
+    def _ensure_task_handoff_provenance_columns(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add nullable task handoff provenance columns."""
+        columns = _table_columns(connection, "task_handoffs")
+        for column_name, column_type in _TASK_HANDOFF_PROVENANCE_COLUMNS:
+            if column_name not in columns:
+                connection.execute(
+                    "ALTER TABLE task_handoffs "
                     f"ADD COLUMN {column_name} {column_type}",
                 )
 

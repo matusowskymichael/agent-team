@@ -17,6 +17,7 @@ from agent_team.domain.sessions.agent_session_repository import (
 from agent_team.domain.sessions.invalid_agent_session_id_error import (
     InvalidAgentSessionIdError,
 )
+from agent_team.domain.workflow.workflow_repository import WorkflowRepository
 
 MAX_SESSION_ID_LENGTH = 128
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -33,6 +34,7 @@ class AgentSessionService:
     """Prepare and validate feature-scoped local agent sessions."""
 
     repository: AgentSessionRepository
+    workflow_repository: WorkflowRepository | None = None
 
     def prepare_session(
         self,
@@ -54,6 +56,11 @@ class AgentSessionService:
             raise AgentSessionBindingError("Feature ID must be positive.")
         if role in DEVELOPER_SESSION_ROLES:
             _require_developer_binding(task_id, workspace_identity_hash)
+            self._require_developer_task_assignment(
+                feature_id,
+                role,
+                task_id,
+            )
 
         session_id = (
             derive_agent_session_id(
@@ -92,6 +99,25 @@ class AgentSessionService:
             )
 
         return self.repository.touch_session(session_id)
+
+    def _require_developer_task_assignment(
+        self,
+        feature_id: int,
+        role: DevelopmentRole,
+        task_id: int | None,
+    ) -> None:
+        if self.workflow_repository is None or task_id is None:
+            return
+        task = self.workflow_repository.get_task(task_id)
+        if (
+            task is None
+            or task.feature_id != feature_id
+            or task.assigned_role is not role
+        ):
+            raise AgentSessionBindingError(
+                "Developer session task binding is not valid for this "
+                "feature and role.",
+            )
 
 
 def _validate_session_id(session_id: str) -> None:

@@ -19,6 +19,11 @@ from agent_team.domain.sessions.agent_session_metadata import (
 from agent_team.domain.sessions.invalid_agent_session_id_error import (
     InvalidAgentSessionIdError,
 )
+from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_status import TaskStatus
+from tests.unit.fakes.workflow.fake_workflow_repository import (
+    FakeWorkflowRepository,
+)
 
 
 class _SessionRepository:
@@ -214,3 +219,35 @@ class TestAgentSessionService:
                 task_id=7,
                 workspace_identity_hash="second-workspace",
             )
+
+    def test_rejects_wrong_role_developer_task_before_persisting(self) -> None:
+        """Validate developer task assignment before creating a session."""
+        session_repository = _SessionRepository()
+        workflow_repository = FakeWorkflowRepository()
+        feature = workflow_repository.create_feature(
+            "Feature",
+            "Description.",
+            FeatureStatus.DRAFT,
+        )
+        task = workflow_repository.create_task(
+            feature_id=feature.id,
+            title="Frontend task",
+            description="Wrong role.",
+            assigned_role=DevelopmentRole.FRONTEND_DEVELOPER,
+            status=TaskStatus.PENDING,
+        )
+        service = AgentSessionService(
+            repository=session_repository,
+            workflow_repository=workflow_repository,
+        )
+
+        with pytest.raises(AgentSessionBindingError, match="feature and role"):
+            service.prepare_session(
+                feature_id=feature.id,
+                role=DevelopmentRole.BACKEND_DEVELOPER,
+                requested_session_id=None,
+                task_id=task.id,
+                workspace_identity_hash="workspace-hash",
+            )
+
+        assert session_repository.sessions == {}

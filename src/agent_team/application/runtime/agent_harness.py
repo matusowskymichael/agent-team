@@ -69,6 +69,9 @@ from agent_team.domain.workflow.task_transition_error import (
 from agent_team.domain.workflow.task_verification_evidence import (
     TaskVerificationEvidence,
 )
+from agent_team.domain.workflow.task_verification_workspace_error import (
+    TaskVerificationWorkspaceError,
+)
 
 BLANK_OUTPUT_RECOVERY_PROMPT = (
     "The previous final output was blank. Complete the original request now. "
@@ -275,6 +278,7 @@ class AgentHarness(AgentExecutor):
             DevelopmentTaskNotFoundError,
             TaskSubmissionError,
             TaskTransitionError,
+            TaskVerificationWorkspaceError,
         ):
             return
 

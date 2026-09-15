@@ -18,6 +18,9 @@ from agent_team.domain.workflow.task_verification_check_result import (
 from agent_team.domain.workflow.task_verification_outcome import (
     TaskVerificationOutcome,
 )
+from agent_team.domain.workflow.task_verification_profiles import (
+    BACKEND_REQUIRED_CHECKS,
+)
 from agent_team.domain.workflow.task_verification_result import (
     TaskVerificationResult,
 )
@@ -212,17 +215,22 @@ class TestSQLiteWorkflowRepository:
             submission_id=handoff.id,
             result=_verification_result(),
             next_status=TaskStatus.COMPLETED,
+            required_status=TaskStatus.VERIFICATION_PENDING,
+            latest_submission_id=handoff.id,
         )
         resumed = repository.record_task_verification(
             task_id=task.id,
             submission_id=handoff.id,
             result=_verification_result(),
             next_status=TaskStatus.COMPLETED,
+            required_status=TaskStatus.VERIFICATION_PENDING,
+            latest_submission_id=handoff.id,
         )
 
         assert repository.latest_task_handoff(task.id) == handoff
         assert repository.latest_task_verification(task.id) == evidence
         assert resumed == evidence
+        assert evidence is not None
         assert evidence.checks[0].name == "backend"
         completed_task = repository.get_task(task.id)
         assert completed_task is not None
@@ -244,7 +252,26 @@ class TestSQLiteWorkflowRepository:
         assert task is not None
         assert task.verification_contract is not None
         assert task.verification_contract.profile_name == "backend"
-        assert task.verification_contract.required_checks == ("backend",)
+        assert task.verification_contract.required_checks == (
+            BACKEND_REQUIRED_CHECKS
+        )
+
+    def test_legacy_handoff_rows_remain_readable_after_migration(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Read old handoff rows that predate workspace provenance."""
+        database_path = tmp_path / "workflow.db"
+        _create_legacy_workflow_database(database_path)
+
+        repository = workflow_repository_module.SQLiteWorkflowRepository(
+            database_path,
+        )
+        handoff = repository.latest_task_handoff(1)
+
+        assert handoff is not None
+        assert handoff.workspace_identity_hash is None
+        assert handoff.changed_paths == ("src/app.py",)
 
 
 def _handoff_draft(task_id: int) -> TaskHandoffDraft:
@@ -253,6 +280,7 @@ def _handoff_draft(task_id: int) -> TaskHandoffDraft:
         agent_run_id=1,
         submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
         attribution="agent:backend_developer",
+        workspace_identity_hash="workspace-hash",
         implementation_summary="Implemented.",
         changed_paths=("src/app.py",),
         reused_symbols=("ExistingService",),
@@ -321,6 +349,22 @@ def _create_legacy_workflow_database(database_path: Path) -> None:
                 created_by TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE task_handoffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                agent_run_id INTEGER NOT NULL,
+                submitted_by TEXT NOT NULL,
+                attribution TEXT NOT NULL,
+                implementation_summary TEXT NOT NULL,
+                changed_paths_json TEXT NOT NULL,
+                reused_symbols_json TEXT NOT NULL,
+                new_symbols_json TEXT NOT NULL,
+                reuse_notes TEXT NOT NULL,
+                checks_attempted_json TEXT NOT NULL,
+                limitations TEXT NOT NULL,
+                next_action TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         connection.execute(
@@ -356,6 +400,43 @@ def _create_legacy_workflow_database(database_path: Path) -> None:
             )
             """,
             (timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO task_handoffs (
+                id,
+                task_id,
+                agent_run_id,
+                submitted_by,
+                attribution,
+                implementation_summary,
+                changed_paths_json,
+                reused_symbols_json,
+                new_symbols_json,
+                reuse_notes,
+                checks_attempted_json,
+                limitations,
+                next_action,
+                created_at
+            )
+            VALUES (
+                1,
+                1,
+                1,
+                'backend_developer',
+                'agent:backend_developer',
+                'Implemented.',
+                '["src/app.py"]',
+                '["ExistingService"]',
+                '[]',
+                'Reused service.',
+                '["backend"]',
+                'none',
+                'verify',
+                ?
+            )
+            """,
+            (timestamp,),
         )
         connection.commit()
     finally:

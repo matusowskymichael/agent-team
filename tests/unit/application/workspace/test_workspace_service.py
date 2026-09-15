@@ -300,6 +300,36 @@ class TestWorkspaceService:
 
         assert executor.patch_calls == 0
 
+    @pytest.mark.parametrize(
+        "status",
+        [TaskStatus.VERIFICATION_PENDING, TaskStatus.COMPLETED],
+    )
+    def test_mutation_requires_in_progress_task_status(
+        self,
+        status: TaskStatus,
+    ) -> None:
+        """Deny code mutation after work leaves implementation."""
+        repository = _repository_with_task(
+            DevelopmentRole.BACKEND_DEVELOPER,
+            status=status,
+        )
+        executor = _FakeWorkspaceExecutor()
+        service = WorkspaceService(repository=repository, executor=executor)
+        profile = AgentProfileCatalog().get_profile(
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+
+        with pytest.raises(WorkspaceAccessDeniedError, match="in_progress"):
+            service.apply_patch(
+                profile,
+                _task(DevelopmentRole.BACKEND_DEVELOPER),
+                "backend/auth.py",
+                "old",
+                "new",
+            )
+
+        assert executor.patch_calls == 0
+
     def test_unauthorized_path_is_denied_before_patch(self) -> None:
         """Deny backend mutation of frontend-only paths."""
         repository = _repository_with_task(DevelopmentRole.BACKEND_DEVELOPER)
@@ -434,6 +464,7 @@ class TestWorkspaceService:
 
 def _repository_with_task(
     assigned_role: DevelopmentRole,
+    status: TaskStatus = TaskStatus.IN_PROGRESS,
 ) -> FakeWorkflowRepository:
     repository = FakeWorkflowRepository()
     feature = repository.create_feature(
@@ -446,7 +477,7 @@ def _repository_with_task(
         title="Task",
         description="Task description.",
         assigned_role=assigned_role,
-        status=TaskStatus.PENDING,
+        status=status,
     )
     return repository
 

@@ -10,6 +10,9 @@ from agent_team.application.runtime.agent_harness import AgentHarness
 from agent_team.application.sessions.agent_session_service import (
     AgentSessionService,
 )
+from agent_team.application.sessions.workspace_identity import (
+    workspace_identity_hash,
+)
 from agent_team.application.skills.agent_skill_authorizer import (
     AgentSkillAuthorizer,
 )
@@ -524,7 +527,9 @@ class TestAgentHarness:
             DevelopmentRole.BACKEND_DEVELOPER,
         )
         workflow.update_task_status(task.id, TaskStatus.IN_PROGRESS)
-        workflow.submit_task_for_verification(_handoff_draft(task.id))
+        workflow.submit_task_for_verification(
+            _handoff_draft(task.id, workspace_root),
+        )
         verifier = _HarnessVerifier()
         audit_repository = FakeAgentAuditRepository()
         harness = AgentHarness(
@@ -851,12 +856,16 @@ def _classification_for_tool(tool_name: str) -> ToolClassification:
     return ToolClassification.READ_ONLY
 
 
-def _handoff_draft(task_id: int) -> TaskHandoffDraft:
+def _handoff_draft(
+    task_id: int,
+    workspace_root: Path,
+) -> TaskHandoffDraft:
     return TaskHandoffDraft(
         task_id=task_id,
         agent_run_id=1,
         submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
         attribution="agent:backend_developer",
+        workspace_identity_hash=workspace_identity_hash(workspace_root),
         implementation_summary="Implemented assigned backend behavior.",
         changed_paths=("src/app.py",),
         reused_symbols=("ExistingService",),
