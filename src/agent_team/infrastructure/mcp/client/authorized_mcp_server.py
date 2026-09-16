@@ -198,6 +198,13 @@ class AuthorizedMCPServer(MCPServer):
                 raise audit_error from error
             raise
 
+        if result.is_error:
+            self.audit_repository.fail_tool_invocation(
+                invocation_id=invocation.id,
+                error_type="MCPToolError",
+                error_message="MCP tool reported failure.",
+            )
+            return result
         result_hash, result_preview = sanitize_tool_result(tool_name, result)
         self.audit_repository.complete_tool_invocation(
             invocation_id=invocation.id,

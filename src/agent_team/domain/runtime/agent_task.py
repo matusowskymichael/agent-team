@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
 from agent_team.domain.runtime.development_role import DevelopmentRole
 
 
@@ -16,3 +17,5 @@ class AgentTask:
     session_id: str | None = None
     task_id: int | None = None
     workspace_root: Path | None = None
+    run_limits: AgentRunLimits | None = None
+    continuation_context: str | None = None

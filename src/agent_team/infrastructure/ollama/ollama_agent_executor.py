@@ -4,7 +4,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
-from agents import Agent, Model, RunConfig, Runner, Tool, set_tracing_disabled
+from agents import (
+    Agent,
+    MaxTurnsExceeded,
+    Model,
+    RunConfig,
+    Runner,
+    Tool,
+    set_tracing_disabled,
+)
+from agents.items import TResponseInputItem
 from agents.mcp import MCPServer
 from openai import APIConnectionError, APITimeoutError
 
@@ -96,12 +105,14 @@ class OllamaAgentExecutor:
         context: AgentContextEnvelope | None = None,
         skill_context: str | None = None,
     ) -> AgentResult:
-        """Execute an agent task using the Agents SDK Runner."""
+        """Execute one bounded segment without replaying earlier actions."""
         connected_servers: list[MCPServer] = []
         mcp_servers = self.mcp_server_factory(profile, run, task)
         skill_tools = self.skill_tool_factory(profile, run)
         workspace_tools = self.workspace_tool_factory(profile, run, task)
         session = None if context is None else self.session_factory(context)
+        segment_exhausted = False
+        result: object
 
         try:
             for mcp_server in mcp_servers:
@@ -124,15 +135,23 @@ class OllamaAgentExecutor:
             result = await Runner.run(
                 agent,
                 task.prompt,
-                max_turns=profile.run_limits.max_turns,
+                max_turns=profile.run_limits.segment_turns,
                 run_config=RunConfig(
                     tracing_disabled=True,
+                    session_input_callback=(
+                        _fresh_segment_input
+                        if task.continuation_context is not None
+                        else None
+                    ),
                     model_settings=create_ollama_model_settings(
                         self.settings,
                     ),
                 ),
                 session=session,
             )
+        except MaxTurnsExceeded as error:
+            result = error.run_data
+            segment_exhausted = True
         except (APIConnectionError, APITimeoutError) as error:
             message = (
                 f"Ollama is unavailable at {self.settings.base_url}. "
@@ -144,11 +163,17 @@ class OllamaAgentExecutor:
                 await mcp_server.cleanup()
             close_session(session)
 
-        final_output: object = result.final_output
+        final_output: object = getattr(result, "final_output", "")
         response = omit_hidden_reasoning(str(final_output))
         input_tokens, output_tokens = _usage_tokens(result)
         return AgentResult(
             response=response,
+            segment_exhausted=segment_exhausted,
+            turns_used=(
+                profile.run_limits.segment_turns
+                if segment_exhausted
+                else _response_count(result)
+            ),
             generation_metadata=metadata_from_model(
                 model=self.model,
                 model_name=self.settings.model,
@@ -157,6 +182,22 @@ class OllamaAgentExecutor:
                 visible_output=response,
             ),
         )
+
+
+def _fresh_segment_input(
+    _history: list[TResponseInputItem],
+    new_items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Retain new input while leaving stored session history untouched."""
+    return new_items
+
+
+def _response_count(result: object) -> int:
+    raw_responses = getattr(result, "raw_responses", None)
+    if isinstance(raw_responses, list | tuple):
+        responses = cast("list[object] | tuple[object, ...]", raw_responses)
+        return max(1, len(responses))
+    return 1
 
 
 async def _connect_mcp_server(mcp_server: MCPServer) -> None:

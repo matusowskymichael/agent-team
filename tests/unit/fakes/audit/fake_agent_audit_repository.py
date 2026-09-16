@@ -75,6 +75,7 @@ class FakeAgentAuditRepository:
             task_id=run.task_id,
             workspace_identity_hash=run.workspace_identity_hash,
             generation_metadata=None,
+            total_turn_limit=run.total_turn_limit,
         )
         self.runs[run_record.id] = run_record
         self.next_run_id += 1
@@ -133,6 +134,21 @@ class FakeAgentAuditRepository:
             output_hash=output_hash,
             output_excerpt=output_excerpt,
             generation_metadata=generation_metadata,
+        )
+        self.runs[run_id] = run
+        return run
+
+    def record_run_progress(
+        self,
+        run_id: int,
+        segment_count: int,
+        termination_reason: str | None = None,
+    ) -> AgentRunRecord:
+        """Record segment count and a sanitized logical termination reason."""
+        run = replace(
+            self.runs[run_id],
+            segment_count=segment_count,
+            termination_reason=termination_reason,
         )
         self.runs[run_id] = run
         return run

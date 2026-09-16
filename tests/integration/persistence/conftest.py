@@ -23,6 +23,36 @@ def legacy_audit_database(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+@fixture_title("Create an audit database before logical run progress")
+def audit_database_before_run_progress(legacy_audit_database: Path) -> Path:
+    """Preserve v4 feature, task, workspace, and session attribution."""
+    with (
+        closing(sqlite3.connect(legacy_audit_database)) as connection,
+        connection,
+    ):
+        for name, column_type in (
+            ("session_id", "TEXT"),
+            ("feature_id", "INTEGER"),
+            ("generation_metadata_json", "TEXT"),
+            ("task_id", "INTEGER"),
+            ("workspace_identity_hash", "TEXT"),
+        ):
+            connection.execute(
+                f"ALTER TABLE agent_runs ADD COLUMN {name} {column_type}",
+            )
+        connection.execute(
+            """
+            UPDATE agent_runs
+            SET session_id = 'legacy-session', feature_id = 2, task_id = 3,
+                workspace_identity_hash = 'legacy-workspace'
+            WHERE id = 1
+            """,
+        )
+        connection.execute("PRAGMA user_version = 4")
+    return legacy_audit_database
+
+
+@pytest.fixture
 @fixture_title("Open managed SQLite integration connections")
 def sqlite_connection() -> Iterator[Callable[[Path], sqlite3.Connection]]:
     """Yield SQLite connections and always close them after tests."""

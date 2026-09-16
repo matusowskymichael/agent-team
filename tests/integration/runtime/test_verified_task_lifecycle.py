@@ -34,6 +34,7 @@ from agent_team.domain.context.agent_context_envelope import (
 )
 from agent_team.domain.runtime.agent_profile import AgentProfile
 from agent_team.domain.runtime.agent_result import AgentResult
+from agent_team.domain.runtime.agent_stalled_error import AgentStalledError
 from agent_team.domain.runtime.agent_task import AgentTask
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.runtime.workflow_tool_name import WorkflowToolName
@@ -109,6 +110,8 @@ class _LifecycleRuntime:
         assert task.workspace_root is not None
         assert context is None or context.task_id == task.task_id
         assert skill_context is None
+        if task.continuation_context is not None:
+            return AgentResult(response="No repair was attempted.")
         self.workflow.update_task_status(task.task_id, TaskStatus.IN_PROGRESS)
         _record_tool(
             self.audit_repository,
@@ -247,9 +250,10 @@ class TestVerifiedTaskLifecycleIntegration:
             verification_commands=_failing_checks(),
         )
 
-        result = asyncio.run(
-            harness.execute(_agent_task(task_id, workspace_root)),
-        )
+        with pytest.raises(AgentStalledError):
+            asyncio.run(
+                harness.execute(_agent_task(task_id, workspace_root)),
+            )
 
         task = workflow_repository.get_task(task_id)
         evidence = workflow_repository.latest_task_verification(task_id)
@@ -261,7 +265,6 @@ class TestVerifiedTaskLifecycleIntegration:
         assert evidence.failure_classification is (
             FailureClassification.CHECK_FAILED
         )
-        assert "Verification result: failed" in result.response
 
     def test_interrupted_submission_resumes_verification(
         self,
