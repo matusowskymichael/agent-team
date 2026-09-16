@@ -3,7 +3,7 @@
 import argparse
 import asyncio
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -27,11 +27,17 @@ from agent_team.application.skills.agent_skill_authorizer import (
 from agent_team.application.skills.agent_skill_service import (
     AgentSkillService,
 )
+from agent_team.application.workflow.task_verification_service import (
+    TaskVerificationService,
+)
 from agent_team.application.workspace.workspace_service import (
     WorkspaceService,
 )
 from agent_team.domain.context.agent_context_budget_exceeded_error import (
     AgentContextBudgetExceededError,
+)
+from agent_team.domain.runtime.agent_not_implemented_error import (
+    AgentNotImplementedError,
 )
 from agent_team.domain.runtime.agent_output_blank_error import (
     AgentOutputBlankError,
@@ -54,8 +60,23 @@ from agent_team.domain.sessions.invalid_agent_session_id_error import (
 from agent_team.domain.skills.invalid_agent_skill_error import (
     InvalidAgentSkillError,
 )
+from agent_team.domain.workflow.development_task_not_found_error import (
+    DevelopmentTaskNotFoundError,
+)
 from agent_team.domain.workflow.feature_not_found_error import (
     FeatureNotFoundError,
+)
+from agent_team.domain.workflow.task_submission_error import (
+    TaskSubmissionError,
+)
+from agent_team.domain.workflow.task_transition_error import (
+    TaskTransitionError,
+)
+from agent_team.domain.workflow.task_verification_evidence import (
+    TaskVerificationEvidence,
+)
+from agent_team.domain.workflow.task_verification_workspace_error import (
+    TaskVerificationWorkspaceError,
 )
 from agent_team.domain.workspace.workspace_access_denied_error import (
     WorkspaceAccessDeniedError,
@@ -108,6 +129,9 @@ from agent_team.infrastructure.persistence.sqlite.sessions import (
     sqlite_session_factory as session_factory_module,
 )
 from agent_team.infrastructure.persistence.sqlite.workflow import (
+    sqlite_workflow_migration_error,
+)
+from agent_team.infrastructure.persistence.sqlite.workflow import (
     sqlite_workflow_repository as workflow_repository_module,
 )
 from agent_team.infrastructure.skills.agent_skill_tool_factory import (
@@ -115,6 +139,9 @@ from agent_team.infrastructure.skills.agent_skill_tool_factory import (
 )
 from agent_team.infrastructure.skills.filesystem_agent_skill_catalog import (
     FilesystemAgentSkillCatalog,
+)
+from agent_team.infrastructure.workspace.local_task_verifier import (
+    LocalTaskVerifier,
 )
 from agent_team.infrastructure.workspace.local_workspace_executor import (
     LocalWorkspaceExecutor,
@@ -130,9 +157,12 @@ from ...infrastructure.mcp.client.workflow_mcp_unavailable_error import (
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command-line interface."""
-    arguments = _parse_arguments(argv)
-
     try:
+        raw_arguments = list(sys.argv[1:] if argv is None else argv)
+        if raw_arguments and raw_arguments[0] == "verify-task":
+            return _run_verify_task_command(raw_arguments[1:])
+
+        arguments = _parse_arguments(raw_arguments)
         if arguments.list_models:
             _print_installed_models(cast("str | None", arguments.model))
             return 0
@@ -140,6 +170,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_available_skills(
                 DevelopmentRole(cast("str", arguments.role)),
             )
+            return 0
+        if arguments.list_agents:
+            _print_available_agents()
             return 0
 
         prompt = cast("str", arguments.prompt)
@@ -166,10 +199,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         InvalidAgentSkillError,
         AgentOutputBlankError,
         AgentOutputIncompleteError,
+        AgentNotImplementedError,
         OllamaModelCapabilityError,
         OllamaModelUnavailableError,
         OllamaUnavailableError,
+        DevelopmentTaskNotFoundError,
         sqlite_audit_migration_error.SQLiteAuditMigrationError,
+        sqlite_workflow_migration_error.SQLiteWorkflowMigrationError,
+        TaskSubmissionError,
+        TaskTransitionError,
+        TaskVerificationWorkspaceError,
         WorkflowMCPUnavailableError,
         WorkspaceAccessDeniedError,
         WorkspaceBindingError,
@@ -233,9 +272,42 @@ def build_orchestrator(settings: OllamaSettings | None = None) -> Orchestrator:
         agent_executor=AgentHarness(
             runtime=runtime,
             audit_repository=audit_repository,
-            session_service=AgentSessionService(session_repository),
+            session_service=AgentSessionService(
+                repository=session_repository,
+                workflow_repository=workflow_repository,
+            ),
             context_provider=FeatureContextBuilder(workflow_repository),
             skill_service=skill_service,
+            task_verification_service=TaskVerificationService(
+                repository=workflow_repository,
+                verifier=LocalTaskVerifier(
+                    executor_factory=LocalWorkspaceExecutor,
+                ),
+                audit_reader=audit_repository,
+            ),
+        ),
+    )
+
+
+def build_task_verification_service(
+    database_path: Path | None = None,
+) -> TaskVerificationService:
+    """Build deterministic task verification services."""
+    resolved_database_path = (
+        load_workflow_database_path()
+        if database_path is None
+        else database_path
+    )
+    workflow_repository = workflow_repository_module.SQLiteWorkflowRepository(
+        resolved_database_path,
+    )
+    return TaskVerificationService(
+        repository=workflow_repository,
+        verifier=LocalTaskVerifier(
+            executor_factory=LocalWorkspaceExecutor,
+        ),
+        audit_reader=audit_repository_module.SQLiteAgentAuditRepository(
+            resolved_database_path,
         ),
     )
 
@@ -272,16 +344,20 @@ def _parse_arguments(
         action="store_true",
         help="List available local Agent Skills for the selected role.",
     )
+    parser.add_argument(
+        "--list-agents",
+        action="store_true",
+        help="List local agent implementation status and capabilities.",
+    )
     parser.add_argument("prompt", nargs="?")
     namespace = parser.parse_args(argv)
     if (
         not namespace.list_models
         and not namespace.list_skills
+        and not namespace.list_agents
         and namespace.prompt is None
     ):
-        parser.error(
-            "prompt is required unless --list-models or --list-skills is used",
-        )
+        parser.error("prompt is required unless a list option is used")
     return namespace
 
 
@@ -333,3 +409,65 @@ def _print_available_skills(role: DevelopmentRole) -> None:
                 ),
             ),
         )
+
+
+def _run_verify_task_command(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(prog="agent-team verify-task")
+    parser.add_argument("--task-id", type=_positive_integer, required=True)
+    parser.add_argument("--workspace-root", type=Path, required=True)
+    arguments = parser.parse_args(argv)
+    evidence = build_task_verification_service().verify_task(
+        task_id=cast("int", arguments.task_id),
+        workspace_root=cast("Path", arguments.workspace_root),
+    )
+    _print_verification_evidence(evidence)
+    return 0
+
+
+def _print_available_agents() -> None:
+    catalog = AgentProfileCatalog()
+    skill_service = build_skill_service()
+    print("ROLE\tSTATUS\tSKILLS\tWORKSPACE_TOOLS\tVERIFICATION_PROFILES")
+    for role in DevelopmentRole:
+        profile = catalog.get_profile(role)
+        skills = skill_service.list_available_metadata(profile)
+        print(
+            "\t".join(
+                (
+                    role.value,
+                    profile.implementation_status.value,
+                    _join_values(skill.name.value for skill in skills),
+                    _join_values(
+                        tool.value for tool in profile.allowed_workspace_tools
+                    ),
+                    _join_values(profile.allowed_verification_profiles),
+                ),
+            ),
+        )
+
+
+def _print_verification_evidence(
+    evidence: TaskVerificationEvidence,
+) -> None:
+    print(f"Task ID: {evidence.task_id}")
+    print(f"Submission ID: {evidence.submission_id}")
+    print(f"Verifier: {evidence.verifier_name}")
+    print(f"Outcome: {evidence.outcome.value}")
+    print(f"Failure classification: {evidence.failure_classification.value}")
+    print(f"Feedback: {evidence.feedback}")
+    print("Checks:")
+    if not evidence.checks:
+        print("- explicitly empty")
+        return
+    for check in evidence.checks:
+        print(
+            f"- {check.name}: exit_code={check.exit_code}, "
+            f"timed_out={check.timed_out}",
+        )
+
+
+def _join_values(values: Iterable[object]) -> str:
+    materialized = tuple(str(value) for value in values)
+    if not materialized:
+        return "-"
+    return ",".join(sorted(materialized))

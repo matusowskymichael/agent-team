@@ -23,6 +23,8 @@ class AgentSessionRepository(Protocol):
         session_id: str,
         feature_id: int,
         role: DevelopmentRole,
+        task_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentSessionMetadata:
         """Persist a new local session binding."""
         ...

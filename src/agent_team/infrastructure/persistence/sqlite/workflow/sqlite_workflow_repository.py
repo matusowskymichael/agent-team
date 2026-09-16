@@ -1,58 +1,68 @@
 """SQLite-backed workflow repository."""
 
+import json
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypeVar, cast
 
 from agent_team.domain.runtime.development_role import DevelopmentRole
+from agent_team.domain.workflow import (
+    task_verification_failure_classification as failure_classification,
+)
 from agent_team.domain.workflow.artifact import Artifact
 from agent_team.domain.workflow.artifact_kind import ArtifactKind
 from agent_team.domain.workflow.development_task import DevelopmentTask
 from agent_team.domain.workflow.feature import Feature
 from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_handoff import TaskHandoff
+from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
 from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.domain.workflow.task_verification_check import (
+    TaskVerificationCheck,
+)
+from agent_team.domain.workflow.task_verification_contract import (
+    TaskVerificationContract,
+)
+from agent_team.domain.workflow.task_verification_evidence import (
+    TaskVerificationEvidence,
+)
+from agent_team.domain.workflow.task_verification_outcome import (
+    TaskVerificationOutcome,
+)
+from agent_team.domain.workflow.task_verification_profiles import (
+    default_verification_contract,
+)
+from agent_team.domain.workflow.task_verification_result import (
+    TaskVerificationResult,
+)
+from agent_team.infrastructure.persistence.sqlite.workflow import (
+    sqlite_workflow_schema_migrator,
+)
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS features (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS artifacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    feature_id INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (feature_id) REFERENCES features(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS development_tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    feature_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL,
-    assigned_role TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (feature_id) REFERENCES features(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_artifacts_feature_id
-ON artifacts(feature_id);
-
-CREATE INDEX IF NOT EXISTS idx_development_tasks_feature_id
-ON development_tasks(feature_id);
+FailureClassification = (
+    failure_classification.TaskVerificationFailureClassification
+)
+_TASK_SELECT_SQL = """
+SELECT
+    id,
+    feature_id,
+    title,
+    description,
+    assigned_role,
+    status,
+    verification_profile,
+    required_checks_json,
+    created_at,
+    updated_at
+FROM development_tasks
 """
+_STATUS_PLACEHOLDERS = "?, ?, ?, ?, ?"
+_UNMATCHED_STATUS = "__unmatched_task_status__"
+_TaskMutationResult = TypeVar("_TaskMutationResult")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,10 +72,10 @@ class SQLiteWorkflowRepository:
     database_path: Path
 
     def __post_init__(self) -> None:
-        """Create the database directory and schema."""
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._transaction() as connection:
-            connection.executescript(SCHEMA_SQL)
+        """Create the database directory and migrate the schema."""
+        sqlite_workflow_schema_migrator.SQLiteWorkflowSchemaMigrator(
+            self.database_path,
+        ).migrate()
 
     def create_feature(
         self,
@@ -96,25 +106,7 @@ class SQLiteWorkflowRepository:
                     timestamp_text,
                 ),
             )
-            feature_id = _last_insert_id(cursor)
-            row = _require_row(
-                connection.execute(
-                    """
-                    SELECT
-                        id,
-                        title,
-                        description,
-                        status,
-                        created_at,
-                        updated_at
-                    FROM features
-                    WHERE id = ?
-                    """,
-                    (feature_id,),
-                ).fetchone(),
-                "created feature",
-            )
-            return _map_feature(row)
+            return _select_feature(connection, _last_insert_id(cursor))
 
     def get_feature(self, feature_id: int) -> Feature | None:
         """Return a feature by ID, if it exists."""
@@ -196,25 +188,7 @@ class SQLiteWorkflowRepository:
                     timestamp_text,
                 ),
             )
-            artifact_id = _last_insert_id(cursor)
-            row = _require_row(
-                connection.execute(
-                    """
-                    SELECT
-                        id,
-                        feature_id,
-                        kind,
-                        content,
-                        created_by,
-                        created_at
-                    FROM artifacts
-                    WHERE id = ?
-                    """,
-                    (artifact_id,),
-                ).fetchone(),
-                "created artifact",
-            )
-            return _map_artifact(row)
+            return _select_artifact(connection, _last_insert_id(cursor))
 
     def list_artifacts(self, feature_id: int) -> list[Artifact]:
         """Return artifacts attached to a feature."""
@@ -240,6 +214,7 @@ class SQLiteWorkflowRepository:
     ) -> DevelopmentTask:
         """Create and persist a development task."""
         timestamp_text = _format_timestamp(_utc_now())
+        contract = default_verification_contract(assigned_role)
         with self._transaction() as connection:
             cursor = connection.execute(
                 """
@@ -249,10 +224,12 @@ class SQLiteWorkflowRepository:
                     description,
                     assigned_role,
                     status,
+                    verification_profile,
+                    required_checks_json,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feature_id,
@@ -260,68 +237,25 @@ class SQLiteWorkflowRepository:
                     description,
                     assigned_role.value,
                     status.value,
+                    None if contract is None else contract.profile_name,
+                    _contract_checks_json(contract),
                     timestamp_text,
                     timestamp_text,
                 ),
             )
-            task_id = _last_insert_id(cursor)
-            row = _require_row(
-                connection.execute(
-                    """
-                    SELECT
-                        id,
-                        feature_id,
-                        title,
-                        description,
-                        assigned_role,
-                        status,
-                        created_at,
-                        updated_at
-                    FROM development_tasks
-                    WHERE id = ?
-                    """,
-                    (task_id,),
-                ).fetchone(),
-                "created development task",
-            )
-            return _map_development_task(row)
+            return _select_task(connection, _last_insert_id(cursor))
 
     def get_task(self, task_id: int) -> DevelopmentTask | None:
         """Return a development task by ID, if it exists."""
         with self._transaction() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    id,
-                    feature_id,
-                    title,
-                    description,
-                    assigned_role,
-                    status,
-                    created_at,
-                    updated_at
-                FROM development_tasks
-                WHERE id = ?
-                """,
-                (task_id,),
-            ).fetchone()
-            return None if row is None else _map_development_task(row)
+            return _select_optional_task(connection, task_id)
 
     def list_tasks(self, feature_id: int) -> list[DevelopmentTask]:
         """Return development tasks attached to a feature."""
         with self._transaction() as connection:
             rows = connection.execute(
-                """
-                SELECT
-                    id,
-                    feature_id,
-                    title,
-                    description,
-                    assigned_role,
-                    status,
-                    created_at,
-                    updated_at
-                FROM development_tasks
+                f"""
+                {_TASK_SELECT_SQL}
                 WHERE feature_id = ?
                 ORDER BY id
                 """,
@@ -345,23 +279,310 @@ class SQLiteWorkflowRepository:
                 """,
                 (status.value, timestamp_text, task_id),
             )
+            return _select_optional_task(connection, task_id)
+
+    def claim_task_for_work(
+        self,
+        task_id: int,
+        from_statuses: frozenset[TaskStatus],
+        active_statuses: frozenset[TaskStatus],
+    ) -> DevelopmentTask | None:
+        """Start one task if no same-role task is already active."""
+        if not from_statuses or not active_statuses:
+            return None
+        timestamp_text = _format_timestamp(_utc_now())
+        with self._transaction("BEGIN IMMEDIATE") as connection:
+            task = _select_optional_task(connection, task_id)
+            if task is None or task.status not in from_statuses:
+                return None
+            conflict_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM development_tasks
+                WHERE feature_id = ?
+                    AND assigned_role = ?
+                    AND id != ?
+                    AND status IN (?, ?, ?, ?, ?)
+                """,
+                (
+                    task.feature_id,
+                    task.assigned_role.value,
+                    task_id,
+                    *_status_values(active_statuses),
+                ),
+            ).fetchone()
+            if conflict_count is None or int(conflict_count[0]) > 0:
+                return None
+            connection.execute(
+                """
+                UPDATE development_tasks
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                    AND status IN (?, ?, ?, ?, ?)
+                """,
+                (
+                    TaskStatus.IN_PROGRESS.value,
+                    timestamp_text,
+                    task_id,
+                    *_status_values(from_statuses),
+                ),
+            )
+            return _select_optional_task(connection, task_id)
+
+    def transition_task_status(
+        self,
+        task_id: int,
+        from_statuses: frozenset[TaskStatus],
+        to_status: TaskStatus,
+    ) -> DevelopmentTask | None:
+        """Compare-and-set a task status transition."""
+        if not from_statuses:
+            return None
+        timestamp_text = _format_timestamp(_utc_now())
+        with self._transaction("BEGIN IMMEDIATE") as connection:
+            cursor = connection.execute(
+                """
+                UPDATE development_tasks
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                    AND status IN (?, ?, ?, ?, ?)
+                """,
+                (
+                    to_status.value,
+                    timestamp_text,
+                    task_id,
+                    *_status_values(from_statuses),
+                ),
+            )
+            if cursor.rowcount < 1:
+                return None
+            return _select_optional_task(connection, task_id)
+
+    def run_task_status_locked(
+        self,
+        task_id: int,
+        required_status: TaskStatus,
+        operation: Callable[[], _TaskMutationResult],
+    ) -> _TaskMutationResult | None:
+        """Run an operation while the task has the required status."""
+        with self._transaction("BEGIN IMMEDIATE") as connection:
+            task = _select_optional_task(connection, task_id)
+            if task is None or task.status is not required_status:
+                return None
+            return operation()
+
+    def submit_task_handoff(
+        self,
+        draft: TaskHandoffDraft,
+        from_status: TaskStatus,
+        to_status: TaskStatus,
+    ) -> TaskHandoff | None:
+        """Persist a handoff and move the task to verification."""
+        timestamp_text = _format_timestamp(_utc_now())
+        with self._transaction("BEGIN IMMEDIATE") as connection:
+            task = _select_optional_task(connection, draft.task_id)
+            if task is None or task.status is not from_status:
+                return None
+            cursor = connection.execute(
+                """
+                INSERT INTO task_handoffs (
+                    task_id,
+                    agent_run_id,
+                    submitted_by,
+                    attribution,
+                    workspace_identity_hash,
+                    implementation_summary,
+                    changed_paths_json,
+                    reused_symbols_json,
+                    new_symbols_json,
+                    reuse_notes,
+                    checks_attempted_json,
+                    limitations,
+                    next_action,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    draft.task_id,
+                    draft.agent_run_id,
+                    draft.submitted_by.value,
+                    draft.attribution,
+                    draft.workspace_identity_hash,
+                    draft.implementation_summary,
+                    _json_text(draft.changed_paths),
+                    _json_text(draft.reused_symbols),
+                    _json_text(draft.new_symbols),
+                    draft.reuse_notes,
+                    _json_text(draft.checks_attempted),
+                    draft.limitations,
+                    draft.next_action,
+                    timestamp_text,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE development_tasks
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (to_status.value, timestamp_text, draft.task_id),
+            )
+            return _select_handoff(connection, _last_insert_id(cursor))
+
+    def latest_task_handoff(self, task_id: int) -> TaskHandoff | None:
+        """Return the newest persisted handoff for a task, if present."""
+        with self._transaction() as connection:
             row = connection.execute(
                 """
                 SELECT
                     id,
-                    feature_id,
-                    title,
-                    description,
-                    assigned_role,
-                    status,
-                    created_at,
-                    updated_at
-                FROM development_tasks
-                WHERE id = ?
+                    task_id,
+                    agent_run_id,
+                    submitted_by,
+                    attribution,
+                    workspace_identity_hash,
+                    implementation_summary,
+                    changed_paths_json,
+                    reused_symbols_json,
+                    new_symbols_json,
+                    reuse_notes,
+                    checks_attempted_json,
+                    limitations,
+                    next_action,
+                    created_at
+                FROM task_handoffs
+                WHERE task_id = ?
+                ORDER BY id DESC
+                LIMIT 1
                 """,
                 (task_id,),
             ).fetchone()
-            return None if row is None else _map_development_task(row)
+            return None if row is None else _map_handoff(row)
+
+    def record_task_verification(  # noqa: PLR0913, PLR0917
+        self,
+        task_id: int,
+        submission_id: int,
+        result: TaskVerificationResult,
+        next_status: TaskStatus,
+        required_status: TaskStatus,
+        latest_submission_id: int,
+    ) -> TaskVerificationEvidence | None:
+        """Persist verification evidence and apply the resulting status."""
+        timestamp_text = _format_timestamp(_utc_now())
+        with self._transaction("BEGIN IMMEDIATE") as connection:
+            existing = _select_verification_by_submission(
+                connection,
+                submission_id,
+            )
+            if existing is not None:
+                return existing
+            task = _select_optional_task(connection, task_id)
+            latest_handoff = _latest_task_handoff_in_transaction(
+                connection,
+                task_id,
+            )
+            if (
+                task is None
+                or task.status is not required_status
+                or latest_handoff is None
+                or latest_handoff.id != latest_submission_id
+                or submission_id != latest_submission_id
+            ):
+                return None
+            cursor = connection.execute(
+                """
+                INSERT INTO task_verifications (
+                    task_id,
+                    submission_id,
+                    verifier_name,
+                    outcome,
+                    failure_classification,
+                    feedback,
+                    started_at,
+                    ended_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    submission_id,
+                    result.verifier_name,
+                    result.outcome.value,
+                    result.failure_classification.value,
+                    result.feedback,
+                    _format_timestamp(result.started_at),
+                    _format_timestamp(result.ended_at),
+                ),
+            )
+            verification_id = _last_insert_id(cursor)
+            for check in result.checks:
+                connection.execute(
+                    """
+                    INSERT INTO task_verification_checks (
+                        verification_id,
+                        name,
+                        started_at,
+                        ended_at,
+                        exit_code,
+                        timed_out,
+                        stdout_hash,
+                        stdout_excerpt,
+                        stderr_hash,
+                        stderr_excerpt
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        verification_id,
+                        check.name,
+                        _format_timestamp(check.started_at),
+                        _format_timestamp(check.ended_at),
+                        check.exit_code,
+                        int(check.timed_out),
+                        check.stdout_hash,
+                        check.stdout_excerpt,
+                        check.stderr_hash,
+                        check.stderr_excerpt,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE development_tasks
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (next_status.value, timestamp_text, task_id),
+            )
+            return _select_verification(connection, verification_id)
+
+    def latest_task_verification(
+        self,
+        task_id: int,
+    ) -> TaskVerificationEvidence | None:
+        """Return the newest persisted verification evidence for a task."""
+        with self._transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    id,
+                    task_id,
+                    submission_id,
+                    verifier_name,
+                    outcome,
+                    failure_classification,
+                    feedback,
+                    started_at,
+                    ended_at
+                FROM task_verifications
+                WHERE task_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            return None if row is None else _map_verification(connection, row)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -370,10 +591,13 @@ class SQLiteWorkflowRepository:
         return connection
 
     @contextmanager
-    def _transaction(self) -> Generator[sqlite3.Connection]:
+    def _transaction(
+        self,
+        begin_statement: str = "BEGIN",
+    ) -> Generator[sqlite3.Connection]:
         connection = self._connect()
         try:
-            connection.execute("BEGIN")
+            connection.execute(begin_statement)
             yield connection
             connection.commit()
         except Exception:
@@ -381,6 +605,216 @@ class SQLiteWorkflowRepository:
             raise
         finally:
             connection.close()
+
+
+def _select_feature(
+    connection: sqlite3.Connection,
+    feature_id: int,
+) -> Feature:
+    row = _require_row(
+        connection.execute(
+            """
+            SELECT id, title, description, status, created_at, updated_at
+            FROM features
+            WHERE id = ?
+            """,
+            (feature_id,),
+        ).fetchone(),
+        "feature",
+    )
+    return _map_feature(row)
+
+
+def _select_artifact(
+    connection: sqlite3.Connection,
+    artifact_id: int,
+) -> Artifact:
+    row = _require_row(
+        connection.execute(
+            """
+            SELECT id, feature_id, kind, content, created_by, created_at
+            FROM artifacts
+            WHERE id = ?
+            """,
+            (artifact_id,),
+        ).fetchone(),
+        "artifact",
+    )
+    return _map_artifact(row)
+
+
+def _select_optional_task(
+    connection: sqlite3.Connection,
+    task_id: int,
+) -> DevelopmentTask | None:
+    row = connection.execute(
+        f"""
+        {_TASK_SELECT_SQL}
+        WHERE id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    return None if row is None else _map_development_task(row)
+
+
+def _select_task(
+    connection: sqlite3.Connection,
+    task_id: int,
+) -> DevelopmentTask:
+    row = _require_row(
+        connection.execute(
+            f"""
+            {_TASK_SELECT_SQL}
+            WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone(),
+        "development task",
+    )
+    return _map_development_task(row)
+
+
+def _select_handoff(
+    connection: sqlite3.Connection,
+    handoff_id: int,
+) -> TaskHandoff:
+    row = _require_row(
+        connection.execute(
+            """
+            SELECT
+                id,
+                task_id,
+                agent_run_id,
+                submitted_by,
+                attribution,
+                workspace_identity_hash,
+                implementation_summary,
+                changed_paths_json,
+                reused_symbols_json,
+                new_symbols_json,
+                reuse_notes,
+                checks_attempted_json,
+                limitations,
+                next_action,
+                created_at
+            FROM task_handoffs
+            WHERE id = ?
+            """,
+            (handoff_id,),
+        ).fetchone(),
+        "task handoff",
+    )
+    return _map_handoff(row)
+
+
+def _latest_task_handoff_in_transaction(
+    connection: sqlite3.Connection,
+    task_id: int,
+) -> TaskHandoff | None:
+    row = connection.execute(
+        """
+        SELECT
+            id,
+            task_id,
+            agent_run_id,
+            submitted_by,
+            attribution,
+            workspace_identity_hash,
+            implementation_summary,
+            changed_paths_json,
+            reused_symbols_json,
+            new_symbols_json,
+            reuse_notes,
+            checks_attempted_json,
+            limitations,
+            next_action,
+            created_at
+        FROM task_handoffs
+        WHERE task_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    return None if row is None else _map_handoff(row)
+
+
+def _select_verification(
+    connection: sqlite3.Connection,
+    verification_id: int,
+) -> TaskVerificationEvidence:
+    row = _require_row(
+        connection.execute(
+            """
+            SELECT
+                id,
+                task_id,
+                submission_id,
+                verifier_name,
+                outcome,
+                failure_classification,
+                feedback,
+                started_at,
+                ended_at
+            FROM task_verifications
+            WHERE id = ?
+            """,
+            (verification_id,),
+        ).fetchone(),
+        "task verification",
+    )
+    return _map_verification(connection, row)
+
+
+def _select_verification_by_submission(
+    connection: sqlite3.Connection,
+    submission_id: int,
+) -> TaskVerificationEvidence | None:
+    row = connection.execute(
+        """
+        SELECT
+            id,
+            task_id,
+            submission_id,
+            verifier_name,
+            outcome,
+            failure_classification,
+            feedback,
+            started_at,
+            ended_at
+        FROM task_verifications
+        WHERE submission_id = ?
+        """,
+        (submission_id,),
+    ).fetchone()
+    return None if row is None else _map_verification(connection, row)
+
+
+def _select_verification_checks(
+    connection: sqlite3.Connection,
+    verification_id: int,
+) -> tuple[TaskVerificationCheck, ...]:
+    rows = connection.execute(
+        """
+        SELECT
+            id,
+            verification_id,
+            name,
+            started_at,
+            ended_at,
+            exit_code,
+            timed_out,
+            stdout_hash,
+            stdout_excerpt,
+            stderr_hash,
+            stderr_excerpt
+        FROM task_verification_checks
+        WHERE verification_id = ?
+        ORDER BY id
+        """,
+        (verification_id,),
+    ).fetchall()
+    return tuple(_map_verification_check(row) for row in rows)
 
 
 def _utc_now() -> datetime:
@@ -431,13 +865,122 @@ def _map_artifact(row: sqlite3.Row) -> Artifact:
 
 
 def _map_development_task(row: sqlite3.Row) -> DevelopmentTask:
+    role = DevelopmentRole(str(row["assigned_role"]))
     return DevelopmentTask(
         id=int(row["id"]),
         feature_id=int(row["feature_id"]),
         title=str(row["title"]),
         description=str(row["description"]),
-        assigned_role=DevelopmentRole(str(row["assigned_role"])),
+        assigned_role=role,
         status=TaskStatus(str(row["status"])),
         created_at=_parse_timestamp(str(row["created_at"])),
         updated_at=_parse_timestamp(str(row["updated_at"])),
+        verification_contract=_map_verification_contract(row, role),
+    )
+
+
+def _map_handoff(row: sqlite3.Row) -> TaskHandoff:
+    return TaskHandoff(
+        id=int(row["id"]),
+        task_id=int(row["task_id"]),
+        agent_run_id=int(row["agent_run_id"]),
+        submitted_by=DevelopmentRole(str(row["submitted_by"])),
+        attribution=str(row["attribution"]),
+        workspace_identity_hash=_optional_text(row["workspace_identity_hash"]),
+        implementation_summary=str(row["implementation_summary"]),
+        changed_paths=_json_tuple(str(row["changed_paths_json"])),
+        reused_symbols=_json_tuple(str(row["reused_symbols_json"])),
+        new_symbols=_json_tuple(str(row["new_symbols_json"])),
+        reuse_notes=str(row["reuse_notes"]),
+        checks_attempted=_json_tuple(str(row["checks_attempted_json"])),
+        limitations=str(row["limitations"]),
+        next_action=str(row["next_action"]),
+        created_at=_parse_timestamp(str(row["created_at"])),
+    )
+
+
+def _map_verification(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> TaskVerificationEvidence:
+    verification_id = int(row["id"])
+    return TaskVerificationEvidence(
+        id=verification_id,
+        task_id=int(row["task_id"]),
+        submission_id=int(row["submission_id"]),
+        verifier_name=str(row["verifier_name"]),
+        outcome=TaskVerificationOutcome(str(row["outcome"])),
+        failure_classification=FailureClassification(
+            str(row["failure_classification"]),
+        ),
+        feedback=str(row["feedback"]),
+        checks=_select_verification_checks(connection, verification_id),
+        started_at=_parse_timestamp(str(row["started_at"])),
+        ended_at=_parse_timestamp(str(row["ended_at"])),
+    )
+
+
+def _map_verification_check(row: sqlite3.Row) -> TaskVerificationCheck:
+    return TaskVerificationCheck(
+        id=int(row["id"]),
+        verification_id=int(row["verification_id"]),
+        name=str(row["name"]),
+        started_at=_parse_timestamp(str(row["started_at"])),
+        ended_at=_parse_timestamp(str(row["ended_at"])),
+        exit_code=int(row["exit_code"]),
+        timed_out=bool(row["timed_out"]),
+        stdout_hash=str(row["stdout_hash"]),
+        stdout_excerpt=str(row["stdout_excerpt"]),
+        stderr_hash=str(row["stderr_hash"]),
+        stderr_excerpt=str(row["stderr_excerpt"]),
+    )
+
+
+def _map_verification_contract(
+    row: sqlite3.Row,
+    assigned_role: DevelopmentRole,
+) -> TaskVerificationContract | None:
+    profile_value = row["verification_profile"]
+    checks_value = row["required_checks_json"]
+    if profile_value is None or checks_value is None:
+        return default_verification_contract(assigned_role)
+    return TaskVerificationContract(
+        profile_name=str(profile_value),
+        required_checks=_json_tuple(str(checks_value)),
+    )
+
+
+def _contract_checks_json(
+    contract: TaskVerificationContract | None,
+) -> str | None:
+    if contract is None:
+        return None
+    return _json_text(contract.required_checks)
+
+
+def _json_text(values: tuple[str, ...]) -> str:
+    return json.dumps(list(values), separators=(",", ":"))
+
+
+def _json_tuple(value: str) -> tuple[str, ...]:
+    parsed: object = json.loads(value)
+    if not isinstance(parsed, list):
+        raise RuntimeError("SQLite stored invalid workflow JSON.")
+    parsed_items = cast("list[object]", parsed)
+    if not all(isinstance(item, str) for item in parsed_items):
+        raise RuntimeError("SQLite stored invalid workflow JSON.")
+    items = cast("list[str]", parsed_items)
+    return tuple(items)
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _status_values(statuses: frozenset[TaskStatus]) -> tuple[str, ...]:
+    return tuple(
+        status.value if status in statuses else _UNMATCHED_STATUS
+        for status in TaskStatus
     )

@@ -59,9 +59,11 @@ class SQLiteAgentAuditRepository:
                     started_at,
                     max_turns,
                     session_id,
-                    feature_id
+                    feature_id,
+                    task_id,
+                    workspace_identity_hash
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.role.value,
@@ -73,6 +75,8 @@ class SQLiteAgentAuditRepository:
                     run.max_turns,
                     run.session_id,
                     run.feature_id,
+                    run.task_id,
+                    run.workspace_identity_hash,
                 ),
             )
             return _select_run(connection, _last_insert_id(cursor))
@@ -334,6 +338,8 @@ class SQLiteAgentAuditRepository:
                     error_message,
                     session_id,
                     feature_id,
+                    task_id,
+                    workspace_identity_hash,
                     generation_metadata_json
                 FROM agent_runs
                 ORDER BY id DESC
@@ -364,6 +370,8 @@ class SQLiteAgentAuditRepository:
                     error_message,
                     session_id,
                     feature_id,
+                    task_id,
+                    workspace_identity_hash,
                     generation_metadata_json
                 FROM agent_runs
                 WHERE id = ?
@@ -446,6 +454,8 @@ def _select_run(
                 error_message,
                 session_id,
                 feature_id,
+                task_id,
+                workspace_identity_hash,
                 generation_metadata_json
             FROM agent_runs
             WHERE id = ?
@@ -533,6 +543,8 @@ def _map_run(row: sqlite3.Row) -> AgentRunRecord:
         error_message=_optional_text(row["error_message"]),
         session_id=_optional_text(row["session_id"]),
         feature_id=_optional_int(row["feature_id"]),
+        task_id=_optional_int(row["task_id"]),
+        workspace_identity_hash=_optional_text(row["workspace_identity_hash"]),
         generation_metadata=_generation_metadata(
             row["generation_metadata_json"],
         ),

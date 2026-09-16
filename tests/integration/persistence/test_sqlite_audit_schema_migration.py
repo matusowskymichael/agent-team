@@ -74,6 +74,8 @@ class TestSQLiteAuditSchemaMigration:
         old_output = capsys.readouterr()
         assert "Run 1" in old_output.out
         assert "Feature ID: -" in old_output.out
+        assert "Task ID: -" in old_output.out
+        assert "Workspace identity hash: -" in old_output.out
         assert "Session ID: -" in old_output.out
         assert "development_workflow.list_features" in old_output.out
         assert old_output.err == ""
@@ -81,6 +83,8 @@ class TestSQLiteAuditSchemaMigration:
         assert audit_cli.main(["show-run", str(new_run.id)]) == 0
         new_output = capsys.readouterr()
         assert "Feature ID: 42" in new_output.out
+        assert "Task ID: -" in new_output.out
+        assert "Workspace identity hash: -" in new_output.out
         assert "Session ID: session-new" in new_output.out
         assert "Generation metadata: -" in new_output.out
         assert new_output.err == ""
@@ -151,7 +155,22 @@ class TestSQLiteAuditSchemaMigration:
             "agent_runs",
             sqlite_connection,
         )
+        assert "task_id" not in _columns(
+            database_path,
+            "agent_runs",
+            sqlite_connection,
+        )
+        assert "workspace_identity_hash" not in _columns(
+            database_path,
+            "agent_runs",
+            sqlite_connection,
+        )
         assert "idx_agent_runs_session_id" not in _index_names(
+            database_path,
+            "agent_runs",
+            sqlite_connection,
+        )
+        assert "idx_agent_runs_task_id" not in _index_names(
             database_path,
             "agent_runs",
             sqlite_connection,
@@ -180,6 +199,8 @@ class TestSQLiteAuditSchemaMigration:
                 assert {
                     "session_id",
                     "feature_id",
+                    "task_id",
+                    "workspace_identity_hash",
                     "generation_metadata_json",
                 }.issubset(columns)
                 calls.append("create_indexes")
@@ -221,6 +242,8 @@ def _assert_current_schema(
         "error_message",
         "session_id",
         "feature_id",
+        "task_id",
+        "workspace_identity_hash",
         "generation_metadata_json",
     }.issubset(agent_run_columns)
     assert {
@@ -245,6 +268,8 @@ def _assert_current_schema(
         "idx_agent_runs_started_at",
         "idx_agent_runs_session_id",
         "idx_agent_runs_feature_id",
+        "idx_agent_runs_task_id",
+        "idx_agent_runs_workspace_identity_hash",
     }.issubset(_index_names(database_path, "agent_runs", connect))
     assert {
         "idx_tool_invocations_run_id",
@@ -275,6 +300,8 @@ def _assert_legacy_rows_were_preserved(
             error_message,
             session_id,
             feature_id,
+            task_id,
+            workspace_identity_hash,
             generation_metadata_json
         FROM agent_runs
         WHERE id = 1
@@ -312,6 +339,8 @@ def _assert_legacy_rows_were_preserved(
         6,
         "legacy-output-hash",
         "Feature list returned.",
+        None,
+        None,
         None,
         None,
         None,

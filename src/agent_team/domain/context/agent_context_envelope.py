@@ -11,3 +11,5 @@ class AgentContextEnvelope:
     session_id: str
     authoritative_context: str
     max_conversation_history_items: int
+    task_id: int | None = None
+    workspace_identity_hash: str | None = None

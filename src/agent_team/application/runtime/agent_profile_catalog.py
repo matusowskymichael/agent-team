@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass, field
 
+from agent_team.domain.runtime.agent_implementation_status import (
+    AgentImplementationStatus,
+)
 from agent_team.domain.runtime.agent_profile import AgentProfile
 from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
 from agent_team.domain.runtime.capability_denied_error import (
@@ -10,6 +13,9 @@ from agent_team.domain.runtime.capability_denied_error import (
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.runtime.workflow_tool_name import WorkflowToolName
 from agent_team.domain.skills.agent_skill_name import AgentSkillName
+from agent_team.domain.workflow.task_verification_profiles import (
+    valid_verification_profiles,
+)
 from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 
 READ_WORKFLOW_TOOLS = frozenset(
@@ -25,7 +31,9 @@ FEATURE_SCOPED_READ_WORKFLOW_TOOLS = READ_WORKFLOW_TOOLS - frozenset(
     {WorkflowToolName.LIST_FEATURES},
 )
 
-ALL_WORKFLOW_TOOLS = frozenset(WorkflowToolName)
+DELIVERY_MANAGER_WORKFLOW_TOOLS = frozenset(WorkflowToolName) - frozenset(
+    {WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION},
+)
 DEFAULT_RUN_LIMITS = AgentRunLimits()
 DEVELOPER_RUN_LIMITS = AgentRunLimits(max_turns=10)
 BUSINESS_ANALYST_SKILLS = frozenset(
@@ -108,6 +116,22 @@ Summarize successful changes concisely and include returned IDs.
 Your tool access is role-limited by code and cannot be expanded by prompts.
 """.strip()
 
+BUSINESS_ANALYST_INSTRUCTIONS = f"""
+{BASE_INSTRUCTIONS}
+
+You are the Business Analyst specialist.
+Clarify feature intent and maintain business-owned requirements and
+acceptance-criteria artifacts. Read the current feature overview before
+answering complete-detail requests or before deciding whether requirements
+or acceptance criteria already exist.
+Save requirements or acceptance-criteria artifacts only when explicitly
+requested, and verify every mutation from a successful tool result before
+claiming success.
+Do not create features, architecture artifacts, implementation-plan
+artifacts, development tasks, source code, filesystem changes, shell commands,
+or task status changes.
+""".strip()
+
 SOFTWARE_ARCHITECT_INSTRUCTIONS = f"""
 {BASE_INSTRUCTIONS}
 
@@ -132,6 +156,23 @@ Do not write application source code or use filesystem, shell, network,
 browser, package-manager, Git, or source-control tools.
 """.strip()
 
+DELIVERY_MANAGER_INSTRUCTIONS = f"""
+{BASE_INSTRUCTIONS}
+
+You are the Delivery Manager manual workflow coordinator.
+You can help a human inspect and maintain workflow records, but you do not
+autonomously route work, verify submissions, or mark implementation tasks
+completed. Completion is controlled by deterministic verification evidence.
+""".strip()
+
+PLACEHOLDER_INSTRUCTIONS = f"""
+{BASE_INSTRUCTIONS}
+
+This specialist role is not implemented yet. It must not run model execution
+until explicit instructions, context policy, capabilities, tests, and
+evaluation expectations are added for the role.
+""".strip()
+
 
 def _default_profiles() -> dict[DevelopmentRole, AgentProfile]:
     return {
@@ -140,6 +181,7 @@ def _default_profiles() -> dict[DevelopmentRole, AgentProfile]:
             instructions=_instructions_for(role),
             allowed_tools=tools,
             run_limits=_role_run_limits().get(role, DEFAULT_RUN_LIMITS),
+            implementation_status=_role_statuses()[role],
             allowed_skill_names=_role_skills().get(role, frozenset()),
             allowed_workspace_tools=_role_workspace_tools().get(
                 role,
@@ -150,6 +192,7 @@ def _default_profiles() -> dict[DevelopmentRole, AgentProfile]:
                 frozenset(),
             ),
             allowed_workspace_checks=_role_checks().get(role, frozenset()),
+            allowed_verification_profiles=valid_verification_profiles(role),
         )
         for role, tools in _role_tools().items()
     }
@@ -157,7 +200,7 @@ def _default_profiles() -> dict[DevelopmentRole, AgentProfile]:
 
 def _role_tools() -> dict[DevelopmentRole, frozenset[WorkflowToolName]]:
     return {
-        DevelopmentRole.DELIVERY_MANAGER: ALL_WORKFLOW_TOOLS,
+        DevelopmentRole.DELIVERY_MANAGER: DELIVERY_MANAGER_WORKFLOW_TOOLS,
         DevelopmentRole.BUSINESS_ANALYST: READ_WORKFLOW_TOOLS
         | frozenset({WorkflowToolName.ADD_ARTIFACT}),
         DevelopmentRole.SOFTWARE_ARCHITECT: FEATURE_SCOPED_READ_WORKFLOW_TOOLS
@@ -168,9 +211,19 @@ def _role_tools() -> dict[DevelopmentRole, frozenset[WorkflowToolName]]:
             },
         ),
         DevelopmentRole.BACKEND_DEVELOPER: READ_WORKFLOW_TOOLS
-        | frozenset({WorkflowToolName.UPDATE_TASK_STATUS}),
+        | frozenset(
+            {
+                WorkflowToolName.UPDATE_TASK_STATUS,
+                WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION,
+            },
+        ),
         DevelopmentRole.FRONTEND_DEVELOPER: READ_WORKFLOW_TOOLS
-        | frozenset({WorkflowToolName.UPDATE_TASK_STATUS}),
+        | frozenset(
+            {
+                WorkflowToolName.UPDATE_TASK_STATUS,
+                WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION,
+            },
+        ),
         DevelopmentRole.QA_ENGINEER: READ_WORKFLOW_TOOLS
         | frozenset(
             {
@@ -185,6 +238,20 @@ def _role_tools() -> dict[DevelopmentRole, frozenset[WorkflowToolName]]:
                 WorkflowToolName.UPDATE_TASK_STATUS,
             },
         ),
+    }
+
+
+def _role_statuses() -> dict[DevelopmentRole, AgentImplementationStatus]:
+    return {
+        DevelopmentRole.DELIVERY_MANAGER: (
+            AgentImplementationStatus.MANUAL_COORDINATOR
+        ),
+        DevelopmentRole.BUSINESS_ANALYST: AgentImplementationStatus.RUNNABLE,
+        DevelopmentRole.SOFTWARE_ARCHITECT: AgentImplementationStatus.RUNNABLE,
+        DevelopmentRole.BACKEND_DEVELOPER: AgentImplementationStatus.RUNNABLE,
+        DevelopmentRole.FRONTEND_DEVELOPER: AgentImplementationStatus.RUNNABLE,
+        DevelopmentRole.QA_ENGINEER: AgentImplementationStatus.PLACEHOLDER,
+        DevelopmentRole.CODE_REVIEWER: AgentImplementationStatus.PLACEHOLDER,
     }
 
 
@@ -229,13 +296,17 @@ def _role_run_limits() -> dict[DevelopmentRole, AgentRunLimits]:
 
 
 def _instructions_for(role: DevelopmentRole) -> str:
+    if role is DevelopmentRole.DELIVERY_MANAGER:
+        return DELIVERY_MANAGER_INSTRUCTIONS
+    if role is DevelopmentRole.BUSINESS_ANALYST:
+        return BUSINESS_ANALYST_INSTRUCTIONS
     if role is DevelopmentRole.SOFTWARE_ARCHITECT:
         return SOFTWARE_ARCHITECT_INSTRUCTIONS
     if role is DevelopmentRole.BACKEND_DEVELOPER:
         return f"{BASE_INSTRUCTIONS}\n\n{_backend_developer_instructions()}"
     if role is DevelopmentRole.FRONTEND_DEVELOPER:
         return f"{BASE_INSTRUCTIONS}\n\n{_frontend_developer_instructions()}"
-    return BASE_INSTRUCTIONS
+    return PLACEHOLDER_INSTRUCTIONS
 
 
 def _backend_developer_instructions() -> str:
@@ -258,6 +329,10 @@ run_check(name="backend") because it covers the normal backend verification
 suite. Use individual ruff, pyright, or pytest checks only when requested or
 diagnostically necessary. Report changed files, reused code, checks, and
 limitations truthfully.
+When implementation is ready, call submit_task_for_verification with a
+structured handoff. Runtime supplies checks_attempted from audited workspace
+check results in this run; do not provide that argument yourself. Do not mark
+the task completed; only deterministic verification may do that.
 """.strip()
 
 
@@ -280,6 +355,10 @@ run_check(name="frontend") because it covers the normal frontend verification
 suite. Use individual ruff or pytest checks only when requested or
 diagnostically necessary. Report changed files, reused code, checks, and
 limitations truthfully.
+When implementation is ready, call submit_task_for_verification with a
+structured handoff. Runtime supplies checks_attempted from audited workspace
+check results in this run; do not provide that argument yourself. Do not mark
+the task completed; only deterministic verification may do that.
 """.strip()
 
 

@@ -6,6 +6,7 @@ from mcp.server import MCPServer
 
 from agent_team.application.workflow.workflow_service import WorkflowService
 from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
 from agent_team.domain.workflow.task_status import TaskStatus
 
 from .schemas.artifact_mcp_result import (
@@ -20,29 +21,43 @@ from .schemas.feature_mcp_result import (
 from .schemas.feature_overview_mcp_result import (
     FeatureOverviewMcpResult,
 )
+from .schemas.task_handoff_mcp_result import TaskHandoffMcpResult
 from .workflow_result_serializers import (
     serialize_artifact,
     serialize_development_task,
     serialize_feature,
     serialize_feature_overview,
+    serialize_task_handoff,
 )
 from .workflow_tool_parameters import (
+    AgentRunIdParameter,
     ArtifactContentParameter,
     ArtifactKindParameter,
+    AttributionParameter,
+    ChangedPathsParameter,
+    ChecksAttemptedParameter,
     CreatedByParameter,
     DescriptionParameter,
     DevelopmentRoleParameter,
     FeatureIdParameter,
     FeatureStatusParameter,
+    ImplementationSummaryParameter,
+    InitialTaskStatusParameter,
+    LimitationsParameter,
+    NewSymbolsParameter,
+    NextActionParameter,
     OptionalFeatureStatusParameter,
+    ReusedSymbolsParameter,
+    ReuseNotesParameter,
     TaskIdParameter,
     TaskStatusParameter,
     TitleParameter,
+    WorkspaceIdentityHashParameter,
 )
 
 SERVER_NAME = "agent-team-workflow"
 SERVER_VERSION = "0.1.0"
-EXPECTED_WORKFLOW_TOOL_COUNT = 9
+EXPECTED_WORKFLOW_TOOL_COUNT = 10
 
 
 def create_workflow_mcp_server(service: WorkflowService) -> MCPServer:
@@ -217,7 +232,7 @@ def _register_task_tools(
         title: TitleParameter,
         description: DescriptionParameter,
         assigned_role: DevelopmentRoleParameter,
-        status: TaskStatusParameter = TaskStatus.PENDING,
+        status: InitialTaskStatusParameter = TaskStatus.PENDING.value,
     ) -> DevelopmentTaskMcpResult:
         """Create a task for an existing feature."""
         await _checkpoint()
@@ -250,8 +265,9 @@ def _register_task_tools(
         name="update_task_status",
         title="Update Task Status",
         description=(
-            "Update an existing development task status. Returns the updated "
-            "task with its current status and timestamps."
+            "Apply a model-accessible development task status transition. "
+            "This can start or block an assigned task, but cannot mark a "
+            "task completed or submit it for verification."
         ),
         structured_output=True,
     )
@@ -264,8 +280,68 @@ def _register_task_tools(
         task = service.update_task_status(task_id=task_id, status=status)
         return serialize_development_task(task)
 
-    return len((create_task, list_tasks, update_task_status))
+    @server.tool(
+        name="submit_task_for_verification",
+        title="Submit Task For Verification",
+        description=(
+            "Submit the trusted bound in-progress backend or frontend task "
+            "for deterministic verification. Persists a structured handoff, "
+            "transitions the task to verification_pending, and does not mark "
+            "the task completed. Trusted runtime context supplies run ID, "
+            "role, actor attribution, workspace identity, changed paths, "
+            "and checks attempted from audited current-run check results."
+        ),
+        structured_output=True,
+    )
+    async def submit_task_for_verification(  # noqa: PLR0913, PLR0917
+        task_id: TaskIdParameter,
+        agent_run_id: AgentRunIdParameter,
+        submitted_by: DevelopmentRoleParameter,
+        attribution: AttributionParameter,
+        workspace_identity_hash: WorkspaceIdentityHashParameter,
+        implementation_summary: ImplementationSummaryParameter,
+        changed_paths: ChangedPathsParameter,
+        reused_symbols: ReusedSymbolsParameter,
+        new_symbols: NewSymbolsParameter,
+        reuse_notes: ReuseNotesParameter,
+        checks_attempted: ChecksAttemptedParameter,
+        limitations: LimitationsParameter = "",
+        next_action: NextActionParameter = "run deterministic verification",
+    ) -> TaskHandoffMcpResult:
+        """Submit a task handoff for deterministic verification."""
+        await _checkpoint()
+        handoff = service.submit_task_for_verification(
+            TaskHandoffDraft(
+                task_id=task_id,
+                agent_run_id=agent_run_id,
+                submitted_by=submitted_by,
+                attribution=attribution,
+                workspace_identity_hash=workspace_identity_hash,
+                implementation_summary=implementation_summary,
+                changed_paths=_string_tuple(changed_paths),
+                reused_symbols=_string_tuple(reused_symbols),
+                new_symbols=_string_tuple(new_symbols),
+                reuse_notes=reuse_notes,
+                checks_attempted=_string_tuple(checks_attempted),
+                limitations=limitations,
+                next_action=next_action,
+            ),
+        )
+        return serialize_task_handoff(handoff)
+
+    return len(
+        (
+            create_task,
+            list_tasks,
+            update_task_status,
+            submit_task_for_verification,
+        ),
+    )
 
 
 async def _checkpoint() -> None:
     await asyncio.sleep(0)
+
+
+def _string_tuple(values: list[str]) -> tuple[str, ...]:
+    return tuple(value.strip() for value in values)

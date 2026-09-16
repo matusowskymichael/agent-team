@@ -5,13 +5,19 @@ import asyncio
 import pytest
 from mcp.types import TextContent
 
+from agent_team.application.audit.audit_sanitizer import sanitize_tool_result
 from agent_team.application.runtime.agent_profile_catalog import (
     AgentProfileCatalog,
 )
 from agent_team.application.runtime.capability_authorizer import (
     CapabilityAuthorizer,
 )
+from agent_team.domain.audit.tool_classification import ToolClassification
+from agent_team.domain.audit.tool_invocation_start import ToolInvocationStart
 from agent_team.domain.audit.tool_invocation_status import ToolInvocationStatus
+from agent_team.domain.runtime.agent_implementation_status import (
+    AgentImplementationStatus,
+)
 from agent_team.domain.runtime.agent_profile import AgentProfile
 from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
 from agent_team.domain.runtime.capability_denied_error import (
@@ -88,6 +94,7 @@ class TestAuthorizedMCPServer:
                     "list_artifacts",
                     "list_tasks",
                     "update_task_status",
+                    "submit_task_for_verification",
                 },
             ),
             (
@@ -99,6 +106,7 @@ class TestAuthorizedMCPServer:
                     "list_artifacts",
                     "list_tasks",
                     "update_task_status",
+                    "submit_task_for_verification",
                 },
             ),
             (
@@ -154,6 +162,32 @@ class TestAuthorizedMCPServer:
         assert isinstance(required, list)
         assert "created_by" not in properties
         assert "created_by" not in required
+
+    def test_submit_schema_hides_trusted_provenance(self) -> None:
+        """Remove trusted submission fields from the visible schema."""
+        server = _authorized_server(DevelopmentRole.BACKEND_DEVELOPER)
+
+        tools = asyncio.run(server.list_tools())
+        submit = next(
+            tool
+            for tool in tools
+            if tool.name == "submit_task_for_verification"
+        )
+        properties = submit.input_schema["properties"]
+        required = submit.input_schema["required"]
+
+        assert isinstance(properties, dict)
+        assert isinstance(required, list)
+        for field_name in (
+            "agent_run_id",
+            "submitted_by",
+            "attribution",
+            "changed_paths",
+            "checks_attempted",
+            "workspace_identity_hash",
+        ):
+            assert field_name not in properties
+            assert field_name not in required
 
     def test_business_analyst_cannot_create_feature(self) -> None:
         """Deny feature creation for business analysts."""
@@ -253,6 +287,270 @@ class TestAuthorizedMCPServer:
         )
         assert '"description_hash"' in invocation.arguments_preview_json
         assert "Implement the API." not in invocation.arguments_preview_json
+
+    def test_create_task_rejects_verification_pending_status(self) -> None:
+        """Deny model-created tasks in verification-only lifecycle states."""
+        server = _authorized_server(
+            DevelopmentRole.DELIVERY_MANAGER,
+            bound_feature_id=1,
+        )
+
+        denial = _denial_text(
+            server,
+            "create_task",
+            {
+                "feature_id": 1,
+                "title": "Invalid task",
+                "description": "Should not persist.",
+                "assigned_role": "backend_developer",
+                "status": "verification_pending",
+            },
+        )
+
+        assert _fake_delegate(server).call_count == 0
+        assert "Initial task status" in denial
+
+    def test_submit_handoff_uses_trusted_runtime_provenance(self) -> None:
+        """Inject trusted provenance and successful canonical paths."""
+        repository = FakeWorkflowRepository()
+        feature = repository.create_feature(
+            title="Feature",
+            description="Description",
+            status=FeatureStatus.DRAFT,
+        )
+        task = repository.create_task(
+            feature_id=feature.id,
+            title="Task",
+            description="Description",
+            assigned_role=DevelopmentRole.BACKEND_DEVELOPER,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        audit_repository = FakeAgentAuditRepository()
+        server = _authorized_server(
+            DevelopmentRole.BACKEND_DEVELOPER,
+            repository=repository,
+            audit_repository=audit_repository,
+            bound_feature_id=feature.id,
+            bound_task_id=task.id,
+        )
+        patch_invocation = audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=server.run.id,
+                server_name="workspace",
+                tool_name="apply_patch",
+                classification=ToolClassification.MUTATING,
+                arguments_hash="arguments-hash",
+                arguments_preview_json='{"path":"src\\\\app.py"}',
+            ),
+        )
+        audit_repository.complete_tool_invocation(
+            patch_invocation.id,
+            "result-hash",
+            '{"applied":true,"path":"src/app.py"}',
+        )
+        duplicate_invocation = audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=server.run.id,
+                server_name="workspace",
+                tool_name="apply_patch",
+                classification=ToolClassification.MUTATING,
+                arguments_hash="arguments-hash",
+                arguments_preview_json='{"path":"src/app.py"}',
+            ),
+        )
+        audit_repository.complete_tool_invocation(
+            duplicate_invocation.id,
+            "result-hash",
+            '{"applied":true,"path":"src/app.py"}',
+        )
+        failed_patch_invocation = audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=server.run.id,
+                server_name="workspace",
+                tool_name="apply_patch",
+                classification=ToolClassification.MUTATING,
+                arguments_hash="arguments-hash",
+                arguments_preview_json='{"path":"src/failed.py"}',
+            ),
+        )
+        audit_repository.complete_tool_invocation(
+            failed_patch_invocation.id,
+            "result-hash",
+            '{"applied":false,"path":"src/failed.py"}',
+        )
+        failed_invocation = audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=server.run.id,
+                server_name="workspace",
+                tool_name="apply_patch",
+                classification=ToolClassification.MUTATING,
+                arguments_hash="arguments-hash",
+                arguments_preview_json='{"path":"src/error.py"}',
+            ),
+        )
+        audit_repository.fail_tool_invocation(
+            failed_invocation.id,
+            "RuntimeError",
+            "patch failed",
+        )
+        long_path = "src/" + ("nested/" * 24) + "auth.py"
+        _hash, long_preview = sanitize_tool_result(
+            "apply_patch",
+            {
+                "path": long_path,
+                "applied": True,
+                "before_hash": "before",
+                "after_hash": "after",
+                "line_count_delta": 1,
+                "message": "patch applied",
+            },
+        )
+        long_path_invocation = audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=server.run.id,
+                server_name="workspace",
+                tool_name="apply_patch",
+                classification=ToolClassification.MUTATING,
+                arguments_hash="arguments-hash",
+                arguments_preview_json='{"path":"src/input.py"}',
+            ),
+        )
+        audit_repository.complete_tool_invocation(
+            long_path_invocation.id,
+            "result-hash",
+            long_preview,
+        )
+        decoy_invocation = audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=server.run.id,
+                server_name="development_workflow",
+                tool_name="apply_patch",
+                classification=ToolClassification.MUTATING,
+                arguments_hash="arguments-hash",
+                arguments_preview_json='{"path":"src/decoy.py"}',
+            ),
+        )
+        audit_repository.complete_tool_invocation(
+            decoy_invocation.id,
+            "result-hash",
+            '{"applied":true,"path":"src/decoy.py"}',
+        )
+        check_invocation = audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=server.run.id,
+                server_name="workspace",
+                tool_name="run_check",
+                classification=ToolClassification.READ_ONLY,
+                arguments_hash="arguments-hash",
+                arguments_preview_json='{"name":"backend"}',
+            ),
+        )
+        audit_repository.complete_tool_invocation(
+            check_invocation.id,
+            "result-hash",
+            '{"name":"backend","exit_code":0,"timed_out":false}',
+        )
+
+        asyncio.run(
+            server.call_tool(
+                "submit_task_for_verification",
+                {
+                    "task_id": task.id,
+                    "implementation_summary": "Patched backend behavior.",
+                    "reused_symbols": ["ExistingService"],
+                    "new_symbols": ["NewHandler"],
+                    "reuse_notes": "Reused persistence.",
+                    "limitations": "none",
+                    "next_action": "verify",
+                },
+            ),
+        )
+
+        received_arguments = _fake_delegate(server).received_calls[-1][1]
+        assert received_arguments is not None
+        assert received_arguments["agent_run_id"] == server.run.id
+        assert received_arguments["submitted_by"] == "backend_developer"
+        assert received_arguments["attribution"] == "agent:backend_developer"
+        assert received_arguments["changed_paths"] == [
+            "src/app.py",
+            long_path,
+        ]
+        assert received_arguments["workspace_identity_hash"] == (
+            "workspace-hash"
+        )
+        assert received_arguments["checks_attempted"] == ["backend"]
+
+    def test_user_supplied_submission_provenance_is_denied(self) -> None:
+        """Reject model-supplied trusted handoff fields."""
+        server = _authorized_server(DevelopmentRole.BACKEND_DEVELOPER)
+
+        denial = _denial_text(
+            server,
+            "submit_task_for_verification",
+            {
+                "task_id": 1,
+                "agent_run_id": 99,
+                "implementation_summary": "Claim.",
+            },
+        )
+
+        assert _fake_delegate(server).call_count == 0
+        assert "cannot provide agent_run_id" in denial
+
+    def test_missing_runtime_workspace_identity_denies_submission(
+        self,
+    ) -> None:
+        """Reject submission when trusted workspace provenance is absent."""
+        repository = FakeWorkflowRepository()
+        feature = repository.create_feature(
+            title="Feature",
+            description="Description",
+            status=FeatureStatus.DRAFT,
+        )
+        task = repository.create_task(
+            feature_id=feature.id,
+            title="Task",
+            description="Description",
+            assigned_role=DevelopmentRole.BACKEND_DEVELOPER,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        delegate = FakeMCPServer(
+            tool_names=[tool.value for tool in WorkflowToolName],
+        )
+        audit_repository = FakeAgentAuditRepository()
+        run = audit_repository.open_run(
+            role=DevelopmentRole.BACKEND_DEVELOPER,
+            feature_id=feature.id,
+        )
+        server = AuthorizedMCPServer(
+            delegate=delegate,
+            config=workflow_mcp_config.DevelopmentWorkflowMCPServerConfig(
+                profile=AgentProfileCatalog().get_profile(
+                    DevelopmentRole.BACKEND_DEVELOPER,
+                ),
+                authorizer=CapabilityAuthorizer(repository=repository),
+                audit_repository=audit_repository,
+                run=run,
+                bound_task_id=task.id,
+            ),
+        )
+
+        denial = _denial_text(
+            server,
+            "submit_task_for_verification",
+            {
+                "task_id": task.id,
+                "implementation_summary": "Patched backend behavior.",
+                "reused_symbols": ["ExistingService"],
+                "new_symbols": ["NewHandler"],
+                "reuse_notes": "Reused persistence.",
+                "limitations": "none",
+                "next_action": "verify",
+            },
+        )
+
+        assert delegate.call_count == 0
+        assert "trusted workspace identity" in denial
 
     def test_business_analyst_cannot_add_architecture_artifact(self) -> None:
         """Deny architecture artifacts for business analysts."""
@@ -371,7 +669,14 @@ class TestAuthorizedMCPServer:
         assert _fake_delegate(server).call_count == 0
         assert "cannot assign tasks" in denial
 
-    def test_architect_task_creation_requires_default_status(self) -> None:
+    @pytest.mark.parametrize(
+        "status",
+        [TaskStatus.IN_PROGRESS.value, TaskStatus.VERIFICATION_PENDING.value],
+    )
+    def test_architect_task_creation_requires_default_status(
+        self,
+        status: str,
+    ) -> None:
         """Deny architect task creation with non-default status."""
         server = _authorized_server(DevelopmentRole.SOFTWARE_ARCHITECT)
 
@@ -383,7 +688,7 @@ class TestAuthorizedMCPServer:
                 "title": "Started task",
                 "description": "Should not start immediately.",
                 "assigned_role": "backend_developer",
-                "status": "in_progress",
+                "status": status,
             },
         )
 
@@ -549,6 +854,47 @@ class TestAuthorizedMCPServer:
 
         assert _fake_delegate(server).call_count == 1
 
+    @pytest.mark.parametrize(
+        "role",
+        [
+            DevelopmentRole.DELIVERY_MANAGER,
+            DevelopmentRole.BACKEND_DEVELOPER,
+        ],
+    )
+    def test_completed_status_update_is_denied(
+        self,
+        role: DevelopmentRole,
+    ) -> None:
+        """Deny direct completion through the model status tool."""
+        repository = FakeWorkflowRepository()
+        feature = repository.create_feature(
+            title="Feature",
+            description="Description",
+            status=FeatureStatus.DRAFT,
+        )
+        task = repository.create_task(
+            feature_id=feature.id,
+            title="Task",
+            description="Description",
+            assigned_role=DevelopmentRole.BACKEND_DEVELOPER,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        server = _authorized_server(
+            role,
+            repository=repository,
+            bound_feature_id=feature.id,
+            bound_task_id=task.id if role is task.assigned_role else None,
+        )
+
+        denial = _denial_text(
+            server,
+            "update_task_status",
+            {"task_id": task.id, "status": "completed"},
+        )
+
+        assert _fake_delegate(server).call_count == 0
+        assert "cannot mark tasks completed" in denial
+
     def test_bound_task_status_update_must_match_feature(self) -> None:
         """Deny task-status updates outside a bound feature."""
         repository = FakeWorkflowRepository()
@@ -578,7 +924,7 @@ class TestAuthorizedMCPServer:
         denial = _denial_text(
             server,
             "update_task_status",
-            {"task_id": task.id, "status": "completed"},
+            {"task_id": task.id, "status": "blocked"},
         )
 
         assert _fake_delegate(server).call_count == 0
@@ -616,7 +962,7 @@ class TestAuthorizedMCPServer:
         denial = _denial_text(
             server,
             "update_task_status",
-            {"task_id": second_task.id, "status": "completed"},
+            {"task_id": second_task.id, "status": "in_progress"},
         )
 
         assert _fake_delegate(server).call_count == 0
@@ -750,7 +1096,7 @@ class TestAuthorizedMCPServer:
         _denial_text(
             server,
             "update_task_status",
-            {"task_id": 404, "status": "completed"},
+            {"task_id": 404, "status": "in_progress"},
         )
 
         assert _fake_delegate(server).call_count == 0
@@ -765,6 +1111,7 @@ class TestAuthorizedMCPServer:
             allowed_tools=architect.allowed_tools
             | frozenset({WorkflowToolName.UPDATE_TASK_STATUS}),
             run_limits=architect.run_limits,
+            implementation_status=AgentImplementationStatus.RUNNABLE,
         )
         delegate = FakeMCPServer(
             tool_names=[tool.value for tool in WorkflowToolName],
@@ -786,7 +1133,7 @@ class TestAuthorizedMCPServer:
         _denial_text(
             server,
             "update_task_status",
-            {"task_id": 1, "status": "completed"},
+            {"task_id": 1, "status": "in_progress"},
         )
 
         assert delegate.call_count == 0
@@ -839,7 +1186,11 @@ def _authorized_server(  # noqa: PLR0913, PLR0917
         tool_names=[tool.value for tool in WorkflowToolName],
     )
     audit = audit_repository or FakeAgentAuditRepository()
-    run = audit.open_run(role=role, feature_id=bound_feature_id)
+    run = audit.open_run(
+        role=role,
+        feature_id=bound_feature_id,
+        workspace_identity_hash="workspace-hash",
+    )
     return AuthorizedMCPServer(
         delegate=mcp_delegate,
         config=workflow_mcp_config.DevelopmentWorkflowMCPServerConfig(

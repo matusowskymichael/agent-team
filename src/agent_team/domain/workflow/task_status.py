@@ -9,4 +9,5 @@ class TaskStatus(StrEnum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
+    VERIFICATION_PENDING = "verification_pending"
     COMPLETED = "completed"

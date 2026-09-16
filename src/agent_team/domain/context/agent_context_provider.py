@@ -16,6 +16,8 @@ class AgentContextProvider(Protocol):
         feature_id: int,
         role: DevelopmentRole,
         session_id: str,
+        task_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentContextEnvelope:
         """Build authoritative context for one feature-scoped run."""
         ...

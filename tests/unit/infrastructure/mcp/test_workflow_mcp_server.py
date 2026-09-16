@@ -35,6 +35,9 @@ class TestWorkflowMcpServer:
         get_feature_overview = next(
             tool for tool in tools if tool.name == "get_feature_overview"
         )
+        create_task = next(
+            tool for tool in tools if tool.name == "create_task"
+        )
 
         assert tool_names == {
             "create_feature",
@@ -46,6 +49,7 @@ class TestWorkflowMcpServer:
             "create_task",
             "list_tasks",
             "update_task_status",
+            "submit_task_for_verification",
         }
         assert create_feature.description is not None
         assert "status" in create_feature.input_schema["properties"]
@@ -56,6 +60,10 @@ class TestWorkflowMcpServer:
         assert get_feature_overview.description is not None
         assert "complete feature details" in get_feature_overview.description
         assert "artifacts and tasks" in get_feature_overview.description
+        status_schema = create_task.input_schema["properties"]["status"]
+        assert isinstance(status_schema, dict)
+        status_values = cast("list[object]", status_schema["enum"])
+        assert set(status_values) == {"pending", "blocked"}
 
     def test_calls_workflow_tools(self) -> None:
         """Translate MCP calls to workflow service operations."""
@@ -125,13 +133,13 @@ class TestWorkflowMcpServer:
                 "update_task_status",
                 {
                     "task_id": task_id,
-                    "status": "completed",
+                    "status": "in_progress",
                 },
             ),
         )
         updated_task = _structured_content(updated_result)
 
-        assert updated_task["status"] == "completed"
+        assert updated_task["status"] == "in_progress"
 
 
 def _structured_content(result: object) -> Mapping[str, object]:

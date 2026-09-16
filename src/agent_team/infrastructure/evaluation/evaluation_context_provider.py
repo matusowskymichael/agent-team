@@ -33,6 +33,8 @@ class EvaluationContextProvider:
         feature_id: int,
         role: DevelopmentRole,
         session_id: str,
+        task_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentContextEnvelope:
         """Build context according to the evaluation fixture policy."""
         if self.context_policy is EvalContextPolicy.STANDARD_FEATURE_CONTEXT:
@@ -40,6 +42,8 @@ class EvaluationContextProvider:
                 feature_id=feature_id,
                 role=role,
                 session_id=session_id,
+                task_id=task_id,
+                workspace_identity_hash=workspace_identity_hash,
             )
 
         feature = self.repository.get_feature(feature_id)
@@ -61,6 +65,8 @@ class EvaluationContextProvider:
             max_conversation_history_items=(
                 DEFAULT_MAX_CONVERSATION_HISTORY_ITEMS
             ),
+            task_id=task_id,
+            workspace_identity_hash=workspace_identity_hash,
         )
 
 

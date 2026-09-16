@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import NoReturn
 
+from agent_team.application.workflow.workflow_service import (
+    INITIAL_TASK_STATUSES,
+)
 from agent_team.domain.runtime.agent_profile import AgentProfile
 from agent_team.domain.runtime.capability_denied_error import (
     CapabilityDeniedError,
@@ -41,6 +44,12 @@ TASK_ASSIGNMENT_RESTRICTED_ROLES = frozenset(
         DevelopmentRole.FRONTEND_DEVELOPER,
         DevelopmentRole.QA_ENGINEER,
         DevelopmentRole.CODE_REVIEWER,
+    },
+)
+IMPLEMENTATION_DEVELOPER_ROLES = frozenset(
+    {
+        DevelopmentRole.BACKEND_DEVELOPER,
+        DevelopmentRole.FRONTEND_DEVELOPER,
     },
 )
 
@@ -108,6 +117,13 @@ class CapabilityAuthorizer:
                 bound_feature_id,
                 bound_task_id,
             )
+        elif tool is WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION:
+            self._authorize_submit_task_for_verification(
+                profile,
+                arguments,
+                bound_feature_id,
+                bound_task_id,
+            )
         else:
             _deny()
 
@@ -156,6 +172,28 @@ class CapabilityAuthorizer:
         _validate_bound_feature_id(profile, feature_id, bound_feature_id)
         assigned_role = _require_development_role(arguments, "assigned_role")
         task_status = _optional_task_status(arguments)
+        if (
+            profile.role is DevelopmentRole.SOFTWARE_ARCHITECT
+            and task_status is not None
+            and task_status is not TaskStatus.PENDING
+        ):
+            _deny(
+                "The software_architect role must create tasks with the "
+                "default pending status.",
+            )
+        if task_status is not None and task_status not in (
+            INITIAL_TASK_STATUSES
+        ):
+            valid_values = ", ".join(
+                status.value
+                for status in TaskStatus
+                if status in INITIAL_TASK_STATUSES
+            )
+            _deny(
+                "Initial task status must be one of: "
+                f"{valid_values}. Use submit_task_for_verification to enter "
+                "verification_pending.",
+            )
         if profile.role is DevelopmentRole.DELIVERY_MANAGER:
             return
         if profile.role is not DevelopmentRole.SOFTWARE_ARCHITECT:
@@ -168,11 +206,6 @@ class CapabilityAuthorizer:
                 "The software_architect role cannot assign tasks to "
                 f"{assigned_role.value}.",
             )
-        if task_status is not None and task_status is not TaskStatus.PENDING:
-            _deny(
-                "The software_architect role must create tasks with the "
-                "default pending status.",
-            )
 
     def _authorize_update_task_status(
         self,
@@ -182,7 +215,15 @@ class CapabilityAuthorizer:
         bound_task_id: int | None,
     ) -> None:
         task_id = _require_integer_argument(arguments, "task_id")
-        _require_task_status(arguments)
+        task_status = _require_task_status(arguments)
+        if task_status in {
+            TaskStatus.COMPLETED,
+            TaskStatus.VERIFICATION_PENDING,
+        }:
+            _deny(
+                "The update_task_status tool cannot mark tasks completed or "
+                "submit tasks for verification.",
+            )
         if bound_task_id is not None and task_id != bound_task_id:
             _deny(
                 f"The {profile.role.value} role cannot update task {task_id}.",
@@ -207,6 +248,34 @@ class CapabilityAuthorizer:
         if task is None or task.assigned_role is not profile.role:
             _deny(
                 f"The {profile.role.value} role cannot update task {task_id}.",
+            )
+
+    def _authorize_submit_task_for_verification(
+        self,
+        profile: AgentProfile,
+        arguments: Mapping[str, object] | None,
+        bound_feature_id: int | None,
+        bound_task_id: int | None,
+    ) -> None:
+        task_id = _require_integer_argument(arguments, "task_id")
+        if bound_task_id is None or task_id != bound_task_id:
+            _deny(
+                f"The {profile.role.value} role cannot submit task {task_id}.",
+            )
+        task = self.repository.get_task(task_id)
+        if task is None:
+            _deny(
+                f"The {profile.role.value} role cannot submit task {task_id}.",
+            )
+        _validate_bound_feature_id(profile, task.feature_id, bound_feature_id)
+        if profile.role not in IMPLEMENTATION_DEVELOPER_ROLES:
+            _deny(
+                f"The {profile.role.value} role cannot submit tasks for "
+                "verification.",
+            )
+        if task.assigned_role is not profile.role:
+            _deny(
+                f"The {profile.role.value} role cannot submit task {task_id}.",
             )
 
 

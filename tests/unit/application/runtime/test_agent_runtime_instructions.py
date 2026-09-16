@@ -14,6 +14,9 @@ from agent_team.application.runtime.capability_authorizer import (
 from agent_team.domain.context.agent_context_envelope import (
     AgentContextEnvelope,
 )
+from agent_team.domain.runtime.agent_implementation_status import (
+    AgentImplementationStatus,
+)
 from agent_team.domain.runtime.agent_task import AgentTask
 from agent_team.domain.runtime.capability_denied_error import (
     CapabilityDeniedError,
@@ -55,6 +58,9 @@ class TestAgentRuntimeInstructions:
         assert "Use an available skill" in instructions
         assert "Skills provide procedural knowledge only" in instructions
         assert "Available task assignment roles:" not in instructions
+        assert "not implemented yet" not in profile.instructions
+        assert "development tasks" in profile.instructions
+        assert "Do not create features" in profile.instructions
 
     @pytest.mark.parametrize("role", list(DevelopmentRole))
     def test_generated_instructions_list_only_profile_tools(
@@ -69,6 +75,21 @@ class TestAgentRuntimeInstructions:
         assert _line_values(instructions, "Available tools:") == {
             tool.value for tool in profile.allowed_tools
         }
+
+    @pytest.mark.parametrize("role", list(DevelopmentRole))
+    def test_profile_readiness_matches_instruction_specificity(
+        self,
+        role: DevelopmentRole,
+    ) -> None:
+        """Require explicit non-placeholder text for runnable profiles."""
+        profile = AgentProfileCatalog().get_profile(role)
+
+        has_placeholder_text = "not implemented yet" in profile.instructions
+
+        assert has_placeholder_text is (
+            profile.implementation_status
+            is AgentImplementationStatus.PLACEHOLDER
+        )
 
     def test_business_analyst_profile_has_initial_skills(self) -> None:
         """Assign the first skills only to the business analyst role."""
@@ -191,6 +212,7 @@ class TestAgentRuntimeInstructions:
             "Available workspace checks:",
         )
         assert 'run_check(name="backend")' in instructions
+        assert "Runtime supplies checks_attempted" in instructions
         assert "Use individual ruff, pyright, or pytest checks only" in (
             instructions
         )
@@ -223,6 +245,7 @@ class TestAgentRuntimeInstructions:
             "ruff",
         }
         assert 'run_check(name="frontend")' in instructions
+        assert "Runtime supplies checks_attempted" in instructions
         assert "Use individual ruff or pytest checks only" in instructions
         assert "call find_symbol for every proposed" in instructions
         assert "nearby tests" in instructions

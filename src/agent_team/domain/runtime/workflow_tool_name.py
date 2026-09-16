@@ -15,3 +15,4 @@ class WorkflowToolName(StrEnum):
     CREATE_TASK = "create_task"
     LIST_TASKS = "list_tasks"
     UPDATE_TASK_STATUS = "update_task_status"
+    SUBMIT_TASK_FOR_VERIFICATION = "submit_task_for_verification"

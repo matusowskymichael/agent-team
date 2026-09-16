@@ -89,6 +89,8 @@ def sanitize_tool_result(
     """Return hash and preview text for a tool result."""
     if isinstance(result, Mapping):
         result_mapping = cast("Mapping[object, object]", result)
+        if tool_name in {"apply_patch", "run_check"}:
+            return _sanitize_complete_result(tool_name, result_mapping)
         sanitized = _sanitize_mapping(
             tool_name,
             _string_key_mapping(result_mapping),
@@ -102,6 +104,8 @@ def sanitize_tool_result(
             "Mapping[object, object]",
             structured_content,
         )
+        if tool_name in {"apply_patch", "run_check"}:
+            return _sanitize_complete_result(tool_name, structured_mapping)
         sanitized = _sanitize_mapping(
             tool_name,
             _string_key_mapping(structured_mapping),
@@ -124,10 +128,22 @@ def sanitize_tool_result(
     return hash_text(preview), preview
 
 
+def _sanitize_complete_result(
+    tool_name: str,
+    values: Mapping[object, object],
+) -> tuple[str, str]:
+    sanitized = _sanitize_mapping(tool_name, _string_key_mapping(values))
+    sanitized_json = _to_json(sanitized)
+    return hash_text(sanitized_json), sanitized_json
+
+
 def _sanitize_mapping(
     tool_name: str,
     values: Mapping[str, object],
 ) -> dict[str, object]:
+    if tool_name == "apply_patch":
+        return _sanitize_apply_patch_mapping(values)
+
     sanitized: dict[str, object] = {}
     for key, value in values.items():
         if _is_secret_key(key):
@@ -147,20 +163,48 @@ def _sanitize_mapping(
             description = str(value)
             sanitized["description_hash"] = hash_text(description)
             sanitized["description_length"] = len(description)
-        elif tool_name in {"add_artifact", "read_file"} and key == "content":
-            content = str(value)
-            sanitized["content_hash"] = hash_text(content)
-            sanitized["content_length"] = len(content)
-        elif tool_name == "apply_patch" and key in {"old_text", "new_text"}:
+        elif tool_name == "submit_task_for_verification" and key in {
+            "implementation_summary",
+            "reuse_notes",
+            "limitations",
+            "next_action",
+        }:
             text = str(value)
             sanitized[f"{key}_hash"] = hash_text(text)
             sanitized[f"{key}_length"] = len(text)
+        elif (
+            tool_name in {"add_artifact", "read_file"} and key == "content"
+        ) or (
+            tool_name == "run_check"
+            and key in {"stdout_excerpt", "stderr_excerpt"}
+        ):
+            content = str(value)
+            sanitized[f"{key}_hash"] = hash_text(content)
+            sanitized[f"{key}_length"] = len(content)
         elif key == "line_excerpt":
             excerpt = str(value)
             sanitized["line_excerpt_hash"] = hash_text(excerpt)
             sanitized["line_excerpt_length"] = len(excerpt)
         else:
             sanitized[key] = _sanitize_value(tool_name, value)
+    return sanitized
+
+
+def _sanitize_apply_patch_mapping(
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    sanitized: dict[str, object] = {}
+    for key, value in values.items():
+        if _is_secret_key(key):
+            sanitized[key] = REDACTED_VALUE
+        elif key in {"old_text", "new_text"}:
+            text = str(value)
+            sanitized[f"{key}_hash"] = hash_text(text)
+            sanitized[f"{key}_length"] = len(text)
+        elif key == "path":
+            sanitized[key] = sanitize_full_text(value)
+        else:
+            sanitized[key] = _sanitize_value("apply_patch", value)
     return sanitized
 
 

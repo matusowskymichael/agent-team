@@ -24,6 +24,9 @@ from agent_team.application.skills.agent_skill_authorizer import (
 from agent_team.application.skills.agent_skill_service import (
     AgentSkillService,
 )
+from agent_team.application.workflow.task_verification_service import (
+    TaskVerificationService,
+)
 from agent_team.application.workspace.workspace_service import (
     WorkspaceService,
 )
@@ -57,6 +60,9 @@ from agent_team.infrastructure.configuration.workflow_database_path import (
 from agent_team.infrastructure.evaluation.eval_hashes import hash_text_value
 from agent_team.infrastructure.evaluation.evaluation_context_provider import (
     EvaluationContextProvider,
+)
+from agent_team.infrastructure.evaluation.evaluation_task_verifier import (
+    EvaluationTaskVerifier,
 )
 from agent_team.infrastructure.mcp.client import (
     development_workflow_mcp_process_options as mcp_process_options,
@@ -109,7 +115,14 @@ from ..persistence.sqlite.workflow.sqlite_workflow_repository import (
 
 WorkflowRow = dict[str, object]
 WorkflowSnapshot = dict[str, dict[int, WorkflowRow]]
-WORKFLOW_TABLES = ("features", "artifacts", "development_tasks")
+WORKFLOW_TABLES = (
+    "features",
+    "artifacts",
+    "development_tasks",
+    "task_handoffs",
+    "task_verifications",
+    "task_verification_checks",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +226,7 @@ def _orchestrator(
             repository=workflow_repository,
             executor=LocalWorkspaceExecutor(
                 root=workspace_root,
-                check_commands=_evaluation_check_commands(),
+                check_commands=_evaluation_workspace_check_commands(),
             ),
         ),
         audit_repository=audit_repository,
@@ -248,12 +261,20 @@ def _orchestrator(
         agent_executor=AgentHarness(
             runtime=runtime,
             audit_repository=audit_repository,
-            session_service=AgentSessionService(session_repository),
+            session_service=AgentSessionService(
+                repository=session_repository,
+                workflow_repository=workflow_repository,
+            ),
             context_provider=EvaluationContextProvider(
                 repository=workflow_repository,
                 context_policy=case.context_policy,
             ),
             skill_service=skill_service,
+            task_verification_service=TaskVerificationService(
+                repository=workflow_repository,
+                verifier=EvaluationTaskVerifier(case),
+                audit_reader=audit_repository,
+            ),
         ),
     )
 
@@ -341,7 +362,7 @@ def _workspace_root(case: EvalCase, workspace_root: Path) -> Path | None:
     return None
 
 
-def _evaluation_check_commands() -> dict[str, tuple[str, ...]]:
+def _evaluation_workspace_check_commands() -> dict[str, tuple[str, ...]]:
     return {
         "backend": (sys.executable, "-c", "pass"),
         "frontend": (sys.executable, "-c", "pass"),
@@ -412,10 +433,56 @@ def _snapshot(
         for feature_id in features
         for task in repository.list_tasks(feature_id)
     }
+    handoffs: dict[int, WorkflowRow] = {}
+    verifications: dict[int, WorkflowRow] = {}
+    verification_checks: dict[int, WorkflowRow] = {}
+    for task_id in tasks:
+        handoff = repository.latest_task_handoff(task_id)
+        if handoff is not None:
+            handoffs[handoff.id] = {
+                "id": handoff.id,
+                "task_id": handoff.task_id,
+                "agent_run_id": handoff.agent_run_id,
+                "submitted_by": handoff.submitted_by.value,
+                "attribution": handoff.attribution,
+                "changed_paths": list(handoff.changed_paths),
+                "checks_attempted": list(handoff.checks_attempted),
+                "implementation_summary_hash": hash_text_value(
+                    handoff.implementation_summary,
+                ),
+                "reuse_notes_hash": hash_text_value(handoff.reuse_notes),
+                "next_action_hash": hash_text_value(handoff.next_action),
+            }
+        verification = repository.latest_task_verification(task_id)
+        if verification is not None:
+            verifications[verification.id] = {
+                "id": verification.id,
+                "task_id": verification.task_id,
+                "submission_id": verification.submission_id,
+                "verifier_name": verification.verifier_name,
+                "outcome": verification.outcome.value,
+                "failure_classification": (
+                    verification.failure_classification.value
+                ),
+                "feedback_hash": hash_text_value(verification.feedback),
+            }
+            for check in verification.checks:
+                verification_checks[check.id] = {
+                    "id": check.id,
+                    "verification_id": check.verification_id,
+                    "name": check.name,
+                    "exit_code": check.exit_code,
+                    "timed_out": check.timed_out,
+                    "stdout_hash": check.stdout_hash,
+                    "stderr_hash": check.stderr_hash,
+                }
     return {
         "features": features,
         "artifacts": artifacts,
         "development_tasks": tasks,
+        "task_handoffs": handoffs,
+        "task_verifications": verifications,
+        "task_verification_checks": verification_checks,
     }
 
 

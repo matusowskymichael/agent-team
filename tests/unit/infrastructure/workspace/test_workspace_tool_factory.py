@@ -529,7 +529,7 @@ def _repository_with_task(
         title="Task",
         description="Task description.",
         assigned_role=assigned_role,
-        status=TaskStatus.PENDING,
+        status=TaskStatus.IN_PROGRESS,
     )
     return repository
 

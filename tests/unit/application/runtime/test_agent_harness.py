@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -9,12 +10,19 @@ from agent_team.application.runtime.agent_harness import AgentHarness
 from agent_team.application.sessions.agent_session_service import (
     AgentSessionService,
 )
+from agent_team.application.sessions.workspace_identity import (
+    workspace_identity_hash,
+)
 from agent_team.application.skills.agent_skill_authorizer import (
     AgentSkillAuthorizer,
 )
 from agent_team.application.skills.agent_skill_service import (
     AgentSkillService,
 )
+from agent_team.application.workflow.task_verification_service import (
+    TaskVerificationService,
+)
+from agent_team.application.workflow.workflow_service import WorkflowService
 from agent_team.domain.audit.agent_run_record import AgentRunRecord
 from agent_team.domain.audit.agent_run_status import AgentRunStatus
 from agent_team.domain.audit.tool_classification import ToolClassification
@@ -24,6 +32,9 @@ from agent_team.domain.context.agent_context_envelope import (
 )
 from agent_team.domain.runtime.agent_generation_metadata import (
     AgentGenerationMetadata,
+)
+from agent_team.domain.runtime.agent_not_implemented_error import (
+    AgentNotImplementedError,
 )
 from agent_team.domain.runtime.agent_output_blank_error import (
     AgentOutputBlankError,
@@ -42,12 +53,34 @@ from agent_team.domain.sessions.agent_session_metadata import (
 from agent_team.domain.skills.agent_skill import AgentSkill
 from agent_team.domain.skills.agent_skill_metadata import AgentSkillMetadata
 from agent_team.domain.skills.agent_skill_name import AgentSkillName
+from agent_team.domain.workflow import (
+    task_verification_failure_classification as failure_classification,
+)
+from agent_team.domain.workflow.task_handoff import TaskHandoff
+from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
+from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.domain.workflow.task_verification_check_result import (
+    TaskVerificationCheckResult,
+)
+from agent_team.domain.workflow.task_verification_outcome import (
+    TaskVerificationOutcome,
+)
+from agent_team.domain.workflow.task_verification_result import (
+    TaskVerificationResult,
+)
 from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 from tests.reporting.allure_steps import report_step
 from tests.unit.fakes.audit.fake_agent_audit_repository import (
     FakeAgentAuditRepository,
 )
 from tests.unit.fakes.runtime.fake_agent_runtime import FakeAgentRuntime
+from tests.unit.fakes.workflow.fake_workflow_repository import (
+    FakeWorkflowRepository,
+)
+
+FailureClassification = (
+    failure_classification.TaskVerificationFailureClassification
+)
 
 
 class _SessionRepository:
@@ -65,6 +98,8 @@ class _SessionRepository:
         session_id: str,
         feature_id: int,
         role: DevelopmentRole,
+        task_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentSessionMetadata:
         session = AgentSessionMetadata(
             session_id=session_id,
@@ -72,6 +107,8 @@ class _SessionRepository:
             role=role,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
             updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            task_id=task_id,
+            workspace_identity_hash=workspace_identity_hash,
         )
         self.sessions[session_id] = session
         return session
@@ -86,12 +123,16 @@ class _ContextProvider:
         feature_id: int,
         role: DevelopmentRole,
         session_id: str,
+        task_id: int | None = None,
+        workspace_identity_hash: str | None = None,
     ) -> AgentContextEnvelope:
         return AgentContextEnvelope(
             feature_id=feature_id,
             session_id=session_id,
             authoritative_context=f"context for {role.value} feature",
             max_conversation_history_items=5,
+            task_id=task_id,
+            workspace_identity_hash=workspace_identity_hash,
         )
 
 
@@ -221,6 +262,43 @@ class _DeveloperWorkflowRuntime:
                 result_preview="{}",
             )
         return AgentResult(response=f"{profile.role.value} final report.")
+
+
+class _HarnessVerifier:
+    def __init__(self) -> None:
+        self.handoffs: list[TaskHandoff] = []
+
+    def verify(
+        self,
+        task: object,
+        handoff: TaskHandoff,
+        workspace_root: object,
+    ) -> TaskVerificationResult:
+        """Return a successful deterministic verification result."""
+        _ = (task, workspace_root)
+        self.handoffs.append(handoff)
+        timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+        return TaskVerificationResult(
+            verifier_name="fake-verifier",
+            outcome=TaskVerificationOutcome.PASSED,
+            failure_classification=(FailureClassification.NONE),
+            feedback="All checks passed.",
+            checks=(
+                TaskVerificationCheckResult(
+                    name="backend",
+                    started_at=timestamp,
+                    ended_at=timestamp,
+                    exit_code=0,
+                    timed_out=False,
+                    stdout_hash="stdout-hash",
+                    stdout_excerpt="ok",
+                    stderr_hash="stderr-hash",
+                    stderr_excerpt="",
+                ),
+            ),
+            started_at=timestamp,
+            ended_at=timestamp,
+        )
 
 
 class TestAgentHarness:
@@ -411,6 +489,82 @@ class TestAgentHarness:
             runtime.received_profile.allowed_tools
         )
 
+    def test_placeholder_role_fails_before_model_execution(self) -> None:
+        """Reject incomplete specialist roles before runtime dispatch."""
+        runtime = FakeAgentRuntime(result=AgentResult(response="unused"))
+        audit_repository = FakeAgentAuditRepository()
+        harness = AgentHarness(
+            runtime=runtime,
+            audit_repository=audit_repository,
+        )
+
+        with pytest.raises(AgentNotImplementedError):
+            asyncio.run(
+                harness.execute(
+                    AgentTask(
+                        prompt="Review the code.",
+                        role=DevelopmentRole.CODE_REVIEWER,
+                    ),
+                ),
+            )
+
+        assert runtime.execute_calls == 0
+        assert audit_repository.start_run_calls == 0
+
+    def test_verifies_persisted_submission_after_model_run(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Run deterministic verification from persisted task state."""
+        workspace_root = tmp_path
+        repository = FakeWorkflowRepository()
+        workflow = WorkflowService(repository)
+        feature = workflow.create_feature("Feature", "Description")
+        task = workflow.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        workflow.update_task_status(task.id, TaskStatus.IN_PROGRESS)
+        workflow.submit_task_for_verification(
+            _handoff_draft(task.id, workspace_root),
+        )
+        verifier = _HarnessVerifier()
+        audit_repository = FakeAgentAuditRepository()
+        harness = AgentHarness(
+            runtime=FakeAgentRuntime(
+                result=AgentResult(response="Submitted for verification."),
+            ),
+            audit_repository=audit_repository,
+            task_verification_service=TaskVerificationService(
+                repository,
+                verifier,
+            ),
+        )
+
+        result = asyncio.run(
+            harness.execute(
+                AgentTask(
+                    prompt="Finish assigned task.",
+                    role=DevelopmentRole.BACKEND_DEVELOPER,
+                    feature_id=feature.id,
+                    task_id=task.id,
+                    workspace_root=workspace_root,
+                ),
+            ),
+        )
+
+        assert "Verification result: passed" in result.response
+        completed_task = repository.get_task(task.id)
+        assert completed_task is not None
+        assert completed_task.status is TaskStatus.COMPLETED
+        assert verifier.handoffs[0].task_id == task.id
+        run = audit_repository.runs[1]
+        assert run.task_id == task.id
+        assert run.workspace_identity_hash is not None
+        assert str(workspace_root) not in run.workspace_identity_hash
+
     @pytest.mark.parametrize(
         ("role", "tool_names"),
         [
@@ -425,6 +579,7 @@ class TestAgentHarness:
                     WorkspaceToolName.APPLY_PATCH.value,
                     WorkspaceToolName.RUN_CHECK.value,
                     WorkflowToolName.UPDATE_TASK_STATUS.value,
+                    WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION.value,
                 ),
             ),
             (
@@ -438,6 +593,7 @@ class TestAgentHarness:
                     WorkspaceToolName.APPLY_PATCH.value,
                     WorkspaceToolName.RUN_CHECK.value,
                     WorkflowToolName.UPDATE_TASK_STATUS.value,
+                    WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION.value,
                 ),
             ),
         ],
@@ -694,6 +850,28 @@ def _classification_for_tool(tool_name: str) -> ToolClassification:
     if tool_name in {
         WorkspaceToolName.APPLY_PATCH.value,
         WorkflowToolName.UPDATE_TASK_STATUS.value,
+        WorkflowToolName.SUBMIT_TASK_FOR_VERIFICATION.value,
     }:
         return ToolClassification.MUTATING
     return ToolClassification.READ_ONLY
+
+
+def _handoff_draft(
+    task_id: int,
+    workspace_root: Path,
+) -> TaskHandoffDraft:
+    return TaskHandoffDraft(
+        task_id=task_id,
+        agent_run_id=1,
+        submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
+        attribution="agent:backend_developer",
+        workspace_identity_hash=workspace_identity_hash(workspace_root),
+        implementation_summary="Implemented assigned backend behavior.",
+        changed_paths=("src/app.py",),
+        reused_symbols=("ExistingService",),
+        new_symbols=("NewHandler",),
+        reuse_notes="Existing service was reused.",
+        checks_attempted=("backend",),
+        limitations="none",
+        next_action="verify",
+    )
