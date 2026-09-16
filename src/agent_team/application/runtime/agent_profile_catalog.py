@@ -330,8 +330,9 @@ suite. Use individual ruff, pyright, or pytest checks only when requested or
 diagnostically necessary. Report changed files, reused code, checks, and
 limitations truthfully.
 When implementation is ready, call submit_task_for_verification with a
-structured handoff. Do not mark the task completed; only deterministic
-verification may do that.
+structured handoff. Runtime supplies checks_attempted from audited workspace
+check results in this run; do not provide that argument yourself. Do not mark
+the task completed; only deterministic verification may do that.
 """.strip()
 
 
@@ -355,8 +356,9 @@ suite. Use individual ruff or pytest checks only when requested or
 diagnostically necessary. Report changed files, reused code, checks, and
 limitations truthfully.
 When implementation is ready, call submit_task_for_verification with a
-structured handoff. Do not mark the task completed; only deterministic
-verification may do that.
+structured handoff. Runtime supplies checks_attempted from audited workspace
+check results in this run; do not provide that argument yourself. Do not mark
+the task completed; only deterministic verification may do that.
 """.strip()
 
 

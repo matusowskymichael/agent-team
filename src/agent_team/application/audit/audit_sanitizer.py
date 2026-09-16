@@ -89,8 +89,8 @@ def sanitize_tool_result(
     """Return hash and preview text for a tool result."""
     if isinstance(result, Mapping):
         result_mapping = cast("Mapping[object, object]", result)
-        if tool_name == "apply_patch":
-            return _sanitize_apply_patch_result(result_mapping)
+        if tool_name in {"apply_patch", "run_check"}:
+            return _sanitize_complete_result(tool_name, result_mapping)
         sanitized = _sanitize_mapping(
             tool_name,
             _string_key_mapping(result_mapping),
@@ -104,8 +104,8 @@ def sanitize_tool_result(
             "Mapping[object, object]",
             structured_content,
         )
-        if tool_name == "apply_patch":
-            return _sanitize_apply_patch_result(structured_mapping)
+        if tool_name in {"apply_patch", "run_check"}:
+            return _sanitize_complete_result(tool_name, structured_mapping)
         sanitized = _sanitize_mapping(
             tool_name,
             _string_key_mapping(structured_mapping),
@@ -128,10 +128,11 @@ def sanitize_tool_result(
     return hash_text(preview), preview
 
 
-def _sanitize_apply_patch_result(
+def _sanitize_complete_result(
+    tool_name: str,
     values: Mapping[object, object],
 ) -> tuple[str, str]:
-    sanitized = _sanitize_mapping("apply_patch", _string_key_mapping(values))
+    sanitized = _sanitize_mapping(tool_name, _string_key_mapping(values))
     sanitized_json = _to_json(sanitized)
     return hash_text(sanitized_json), sanitized_json
 
@@ -171,10 +172,15 @@ def _sanitize_mapping(
             text = str(value)
             sanitized[f"{key}_hash"] = hash_text(text)
             sanitized[f"{key}_length"] = len(text)
-        elif tool_name in {"add_artifact", "read_file"} and key == "content":
+        elif (
+            tool_name in {"add_artifact", "read_file"} and key == "content"
+        ) or (
+            tool_name == "run_check"
+            and key in {"stdout_excerpt", "stderr_excerpt"}
+        ):
             content = str(value)
-            sanitized["content_hash"] = hash_text(content)
-            sanitized["content_length"] = len(content)
+            sanitized[f"{key}_hash"] = hash_text(content)
+            sanitized[f"{key}_length"] = len(content)
         elif key == "line_excerpt":
             excerpt = str(value)
             sanitized["line_excerpt_hash"] = hash_text(excerpt)

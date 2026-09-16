@@ -128,7 +128,7 @@ def _run_checks(
                 _error_feedback(error),
                 FailureClassification.CONFIGURATION_ERROR,
             )
-        except (OSError, RuntimeError) as error:
+        except (OSError, RuntimeError, UnicodeDecodeError) as error:
             return tuple(checks), _blocked_from_error(
                 verifier_name,
                 started_at,

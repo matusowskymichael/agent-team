@@ -288,7 +288,8 @@ def _register_task_tools(
             "for deterministic verification. Persists a structured handoff, "
             "transitions the task to verification_pending, and does not mark "
             "the task completed. Trusted runtime context supplies run ID, "
-            "role, actor attribution, workspace identity, and changed paths."
+            "role, actor attribution, workspace identity, changed paths, "
+            "and checks attempted from audited current-run check results."
         ),
         structured_output=True,
     )

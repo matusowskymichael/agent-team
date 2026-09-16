@@ -1,6 +1,7 @@
 """Tests for audit sanitization helpers."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -167,3 +168,37 @@ class TestAuditSanitizer:
         assert "new_text_hash" in parsed
         assert "old-secret" not in preview
         assert "new-secret" not in preview
+
+    @pytest.mark.parametrize("structured", [False, True])
+    def test_run_check_result_preserves_metadata_without_output(
+        self,
+        structured: bool,
+    ) -> None:
+        """Keep check attempts parseable while hashing captured output."""
+        stdout = "Private implementation detail. " * 40
+        stderr = "token=private-secret"
+        payload: dict[str, object] = {
+            "name": "backend",
+            "exit_code": 124,
+            "timed_out": True,
+            "stdout_excerpt": stdout,
+            "stderr_excerpt": stderr,
+        }
+        result = (
+            SimpleNamespace(structured_content=payload)
+            if structured
+            else payload
+        )
+
+        _hash, preview = sanitize_tool_result("run_check", result)
+
+        parsed = json.loads(preview)
+        assert parsed["name"] == "backend"
+        assert parsed["exit_code"] == 124
+        assert parsed["timed_out"] is True
+        assert parsed["stdout_excerpt_length"] == len(stdout)
+        assert parsed["stderr_excerpt_length"] == len(stderr)
+        assert len(parsed["stdout_excerpt_hash"]) == 64
+        assert len(parsed["stderr_excerpt_hash"]) == 64
+        assert "Private implementation detail" not in preview
+        assert "private-secret" not in preview

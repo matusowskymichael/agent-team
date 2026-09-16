@@ -212,6 +212,7 @@ class TestAgentRuntimeInstructions:
             "Available workspace checks:",
         )
         assert 'run_check(name="backend")' in instructions
+        assert "Runtime supplies checks_attempted" in instructions
         assert "Use individual ruff, pyright, or pytest checks only" in (
             instructions
         )
@@ -244,6 +245,7 @@ class TestAgentRuntimeInstructions:
             "ruff",
         }
         assert 'run_check(name="frontend")' in instructions
+        assert "Runtime supplies checks_attempted" in instructions
         assert "Use individual ruff or pytest checks only" in instructions
         assert "call find_symbol for every proposed" in instructions
         assert "nearby tests" in instructions

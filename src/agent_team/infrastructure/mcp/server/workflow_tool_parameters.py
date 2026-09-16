@@ -168,7 +168,10 @@ NewSymbolsParameter = Annotated[
 ChecksAttemptedParameter = Annotated[
     list[HandoffItemParameter],
     Field(
-        description="Bounded list of checks attempted before submission.",
+        description=(
+            "Trusted runtime list of checks with audited current-run "
+            "workspace results, including failed or timed-out checks."
+        ),
         min_length=1,
         max_length=HANDOFF_LIMITS.checks_attempted_count,
     ),

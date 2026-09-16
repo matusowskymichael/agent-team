@@ -47,6 +47,7 @@ TRUSTED_SUBMISSION_ARGUMENTS = frozenset(
         "submitted_by",
         "attribution",
         "changed_paths",
+        "checks_attempted",
         "workspace_identity_hash",
     },
 )
@@ -281,6 +282,7 @@ class AuthorizedMCPServer(MCPServer):
             delegated_arguments["workspace_identity_hash"] = (
                 self._workspace_identity_hash()
             )
+            delegated_arguments["checks_attempted"] = self._checks_attempted()
             return delegated_arguments
 
         if tool_name != WorkflowToolName.ADD_ARTIFACT.value:
@@ -315,6 +317,26 @@ class AuthorizedMCPServer(MCPServer):
         raise CapabilityDeniedError(
             "Task submission requires a trusted workspace identity.",
         )
+
+    def _checks_attempted(self) -> list[str]:
+        invocations = self.audit_repository.list_tool_invocations(self.run.id)
+        names: set[str] = set()
+        for invocation in invocations:
+            if invocation.server_name != "workspace":
+                continue
+            if invocation.tool_name != WorkspaceToolName.RUN_CHECK.value:
+                continue
+            if invocation.status is not ToolInvocationStatus.COMPLETED:
+                continue
+            name = _check_name_from_result(invocation.result_preview)
+            if name is not None:
+                names.add(name)
+        if not names:
+            raise CapabilityDeniedError(
+                "Task submission requires an audited workspace check result "
+                "from the current run.",
+            )
+        return sorted(names)
 
     async def list_prompts(self) -> ListPromptsResult:
         """List prompts from the delegate server."""
@@ -425,3 +447,24 @@ def _path_from_successful_result(result_preview: str | None) -> str | None:
     if not isinstance(path, str) or not path.strip():
         return None
     return path
+
+
+def _check_name_from_result(result_preview: str | None) -> str | None:
+    if result_preview is None:
+        return None
+    try:
+        parsed: object = json.loads(result_preview)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    result = cast("dict[str, object]", parsed)
+    name = result.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if type(result.get("exit_code")) is not int or not isinstance(
+        result.get("timed_out"),
+        bool,
+    ):
+        return None
+    return name

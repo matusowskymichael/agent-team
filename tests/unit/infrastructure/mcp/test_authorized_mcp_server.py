@@ -183,6 +183,7 @@ class TestAuthorizedMCPServer:
             "submitted_by",
             "attribution",
             "changed_paths",
+            "checks_attempted",
             "workspace_identity_hash",
         ):
             assert field_name not in properties
@@ -434,6 +435,21 @@ class TestAuthorizedMCPServer:
             "result-hash",
             '{"applied":true,"path":"src/decoy.py"}',
         )
+        check_invocation = audit_repository.start_tool_invocation(
+            ToolInvocationStart(
+                run_id=server.run.id,
+                server_name="workspace",
+                tool_name="run_check",
+                classification=ToolClassification.READ_ONLY,
+                arguments_hash="arguments-hash",
+                arguments_preview_json='{"name":"backend"}',
+            ),
+        )
+        audit_repository.complete_tool_invocation(
+            check_invocation.id,
+            "result-hash",
+            '{"name":"backend","exit_code":0,"timed_out":false}',
+        )
 
         asyncio.run(
             server.call_tool(
@@ -444,7 +460,6 @@ class TestAuthorizedMCPServer:
                     "reused_symbols": ["ExistingService"],
                     "new_symbols": ["NewHandler"],
                     "reuse_notes": "Reused persistence.",
-                    "checks_attempted": ["backend"],
                     "limitations": "none",
                     "next_action": "verify",
                 },
@@ -463,6 +478,7 @@ class TestAuthorizedMCPServer:
         assert received_arguments["workspace_identity_hash"] == (
             "workspace-hash"
         )
+        assert received_arguments["checks_attempted"] == ["backend"]
 
     def test_user_supplied_submission_provenance_is_denied(self) -> None:
         """Reject model-supplied trusted handoff fields."""
@@ -528,7 +544,6 @@ class TestAuthorizedMCPServer:
                 "reused_symbols": ["ExistingService"],
                 "new_symbols": ["NewHandler"],
                 "reuse_notes": "Reused persistence.",
-                "checks_attempted": ["backend"],
                 "limitations": "none",
                 "next_action": "verify",
             },

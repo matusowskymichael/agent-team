@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_team.application.audit.audit_sanitizer import hash_text
 from agent_team.application.context.feature_context_builder import (
     FeatureContextBuilder,
 )
@@ -313,6 +314,61 @@ class TestVerifiedTaskLifecycleIntegration:
         assert completed_task.status is TaskStatus.COMPLETED
         assert first_evidence == second_evidence
         assert first_evidence.outcome is TaskVerificationOutcome.PASSED
+
+    @pytest.mark.parametrize("stream", ("stdout", "stderr"))
+    def test_invalid_check_output_blocks_verification(
+        self,
+        tmp_path: Path,
+        stream: str,
+    ) -> None:
+        """Persist blocked evidence when a real check emits invalid bytes."""
+        database_path = tmp_path / "workflow.db"
+        workspace_root = _workspace(tmp_path)
+        workflow_repository, workflow, task_id = _seed_task(database_path)
+        verification_commands = _passing_checks()
+        verification_commands[BACKEND_REQUIRED_CHECKS[0]] = (
+            sys.executable,
+            "-c",
+            "print('token=private-value')",
+        )
+        verification_commands[BACKEND_REQUIRED_CHECKS[1]] = (
+            sys.executable,
+            "-c",
+            f"import sys; sys.{stream}.buffer.write("
+            "b'token=invalid-output-value\\xff')",
+        )
+        harness = _harness(
+            workflow_repository=workflow_repository,
+            workflow=workflow,
+            audit_repository=AuditRepository(database_path),
+            check_commands=_passing_checks(),
+            verification_commands=verification_commands,
+        )
+
+        result = asyncio.run(
+            harness.execute(_agent_task(task_id, workspace_root)),
+        )
+        reopened_repository = WorkflowRepository(database_path)
+        task = reopened_repository.get_task(task_id)
+        evidence = reopened_repository.latest_task_verification(task_id)
+
+        assert task is not None
+        assert task.status is TaskStatus.BLOCKED
+        assert evidence is not None
+        assert evidence.outcome is TaskVerificationOutcome.BLOCKED
+        assert evidence.failure_classification is (
+            FailureClassification.INFRASTRUCTURE_ERROR
+        )
+        assert "UnicodeDecodeError" in evidence.feedback
+        assert tuple(check.name for check in evidence.checks) == (
+            BACKEND_REQUIRED_CHECKS[0],
+        )
+        assert evidence.checks[0].stdout_excerpt == "token=[REDACTED]"
+        assert evidence.checks[0].stdout_hash == hash_text("token=[REDACTED]")
+        assert "private-value" not in repr(evidence)
+        assert "invalid-output-value" not in repr(evidence)
+        assert "invalid-output-value" not in result.response
+        assert "Verification result: blocked" in result.response
 
 
 def _harness(
