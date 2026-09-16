@@ -77,6 +77,9 @@ class TestSQLiteAuditSchemaMigration:
         assert "Task ID: -" in old_output.out
         assert "Workspace identity hash: -" in old_output.out
         assert "Session ID: -" in old_output.out
+        assert "Segment count: 0" in old_output.out
+        assert "Total turn limit: -" in old_output.out
+        assert "Termination reason: -" in old_output.out
         assert "development_workflow.list_features" in old_output.out
         assert old_output.err == ""
 
@@ -112,6 +115,40 @@ class TestSQLiteAuditSchemaMigration:
         assert _user_version(database_path, sqlite_connection) == (
             migrator_module.CURRENT_AUDIT_SCHEMA_VERSION
         )
+
+    @pytest.mark.parametrize("user_version", [4, 5])
+    def test_run_progress_migration_preserves_scoped_historical_runs(
+        self,
+        audit_database_before_run_progress: Path,
+        sqlite_connection: Callable[[Path], sqlite3.Connection],
+        user_version: int,
+    ) -> None:
+        """Add missing progress fields idempotently without losing binding."""
+        database_path = audit_database_before_run_progress
+        connection = sqlite_connection(database_path)
+        connection.execute(f"PRAGMA user_version = {user_version}")
+        connection.commit()
+
+        repository = audit_repository_module.SQLiteAgentAuditRepository(
+            database_path,
+        )
+        historical = repository.get_run(1)
+        assert historical is not None
+        assert historical.max_turns == 6
+        assert historical.total_turn_limit is None
+        assert historical.segment_count == 0
+        assert historical.termination_reason is None
+        assert historical.session_id == "legacy-session"
+        assert historical.feature_id == 2
+        assert historical.task_id == 3
+        assert historical.workspace_identity_hash == "legacy-workspace"
+        assert len(repository.list_tool_invocations(1)) == 1
+
+        repeated = audit_repository_module.SQLiteAgentAuditRepository(
+            database_path,
+        )
+        assert repeated.get_run(1) == historical
+        _assert_current_schema(database_path, sqlite_connection)
 
     def test_migration_failure_rolls_back_schema_changes(
         self,
@@ -165,6 +202,16 @@ class TestSQLiteAuditSchemaMigration:
             "agent_runs",
             sqlite_connection,
         )
+        for field_name in (
+            "total_turn_limit",
+            "segment_count",
+            "termination_reason",
+        ):
+            assert field_name not in _columns(
+                database_path,
+                "agent_runs",
+                sqlite_connection,
+            )
         assert "idx_agent_runs_session_id" not in _index_names(
             database_path,
             "agent_runs",
@@ -245,6 +292,9 @@ def _assert_current_schema(
         "task_id",
         "workspace_identity_hash",
         "generation_metadata_json",
+        "total_turn_limit",
+        "segment_count",
+        "termination_reason",
     }.issubset(agent_run_columns)
     assert {
         "id",

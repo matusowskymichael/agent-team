@@ -32,3 +32,6 @@ class AgentRunRecord:
     task_id: int | None = None
     workspace_identity_hash: str | None = None
     generation_metadata: AgentGenerationMetadata | None = None
+    total_turn_limit: int | None = None
+    segment_count: int = 0
+    termination_reason: str | None = None

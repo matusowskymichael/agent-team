@@ -261,6 +261,7 @@ def _orchestrator(
         agent_executor=AgentHarness(
             runtime=runtime,
             audit_repository=audit_repository,
+            workflow_repository=workflow_repository,
             session_service=AgentSessionService(
                 repository=session_repository,
                 workflow_repository=workflow_repository,

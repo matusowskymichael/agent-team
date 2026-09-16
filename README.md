@@ -99,7 +99,8 @@ Useful environment variables:
 - Tools are executable capabilities. Workflow tools come from the local MCP
   server; skill tools only load reviewed local skill text and resources.
 - The shared `AgentHarness` selects the profile, prepares session/context,
-  opens audit records, and invokes the runtime.
+  opens one logical audit run, and continues internal runtime segments while
+  objective progress is made.
 - Workflow data is authoritative SQLite state for features, artifacts, and
   development tasks.
 
@@ -158,6 +159,19 @@ Example output:
 Dependency inversion means high-level code depends on abstractions instead of
 concrete low-level implementations.
 ```
+
+Normal runs have no total-turn or wall-clock deadline. Internal SDK segments
+use ten turns; three consecutive segments without new successful operations
+or authoritative state changes raise `AgentStalledError`. A developer task
+that has begun work continues through verification and repair until it is
+completed, validly blocked, cancelled, or fails. Read-only advice can finish
+normally. See [execution policy](docs/run-to-completion.md) for progress,
+context, and audit details.
+
+For an explicitly bounded diagnostic run, use `--max-turns 30`. Adjust the
+internal segment size with `--segment-turns 10`, or the consecutive no-progress
+threshold with `--stall-segments 3` (minimum two). These flags do not alter tool
+permissions or workflow bindings. Press Ctrl+C to cancel.
 
 Equivalent package entrypoint:
 

@@ -46,7 +46,12 @@ from agent_team.domain.runtime.agent_output_incomplete_error import (
     AgentOutputIncompleteError,
 )
 from agent_team.domain.runtime.agent_result import AgentResult
+from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
+from agent_team.domain.runtime.agent_stalled_error import AgentStalledError
 from agent_team.domain.runtime.agent_task import AgentTask
+from agent_team.domain.runtime.agent_turn_limit_error import (
+    AgentTurnLimitError,
+)
 from agent_team.domain.runtime.capability_denied_error import (
     CapabilityDeniedError,
 )
@@ -154,6 +159,8 @@ from ...infrastructure.mcp.client.workflow_mcp_unavailable_error import (
     WorkflowMCPUnavailableError,
 )
 
+MIN_STALL_SEGMENTS = 2
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command-line interface."""
@@ -163,16 +170,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_verify_task_command(raw_arguments[1:])
 
         arguments = _parse_arguments(raw_arguments)
-        if arguments.list_models:
-            _print_installed_models(cast("str | None", arguments.model))
-            return 0
-        if arguments.list_skills:
-            _print_available_skills(
-                DevelopmentRole(cast("str", arguments.role)),
-            )
-            return 0
-        if arguments.list_agents:
-            _print_available_agents()
+        if (
+            arguments.list_models
+            or arguments.list_skills
+            or arguments.list_agents
+        ):
+            if arguments.list_models:
+                _print_installed_models(cast("str | None", arguments.model))
+            elif arguments.list_skills:
+                _print_available_skills(
+                    DevelopmentRole(cast("str", arguments.role)),
+                )
+            else:
+                _print_available_agents()
             return 0
 
         prompt = cast("str", arguments.prompt)
@@ -183,6 +193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_id=cast("str | None", arguments.session_id),
             task_id=cast("int | None", arguments.task_id),
             workspace_root=cast("Path | None", arguments.workspace_root),
+            run_limits=_run_limits_from_arguments(arguments),
         )
         result = asyncio.run(
             run_prompt(
@@ -200,6 +211,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         AgentOutputBlankError,
         AgentOutputIncompleteError,
         AgentNotImplementedError,
+        AgentStalledError,
+        AgentTurnLimitError,
         OllamaModelCapabilityError,
         OllamaModelUnavailableError,
         OllamaUnavailableError,
@@ -215,6 +228,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as error:
         print(str(error), file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("Agent run cancelled.", file=sys.stderr)
+        return 130
 
     print(result.response)
     return 0
@@ -272,6 +288,7 @@ def build_orchestrator(settings: OllamaSettings | None = None) -> Orchestrator:
         agent_executor=AgentHarness(
             runtime=runtime,
             audit_repository=audit_repository,
+            workflow_repository=workflow_repository,
             session_service=AgentSessionService(
                 repository=session_repository,
                 workflow_repository=workflow_repository,
@@ -335,6 +352,21 @@ def _parse_arguments(
     parser.add_argument("--workspace-root", type=Path)
     parser.add_argument("--model")
     parser.add_argument(
+        "--max-turns",
+        type=_positive_integer,
+        help="Optional diagnostic total turn limit; default: unlimited.",
+    )
+    parser.add_argument(
+        "--segment-turns",
+        type=_positive_integer,
+        help="Internal execution segment size; default: 10 turns.",
+    )
+    parser.add_argument(
+        "--stall-segments",
+        type=_positive_integer,
+        help="Segments without progress before stopping; default: 3.",
+    )
+    parser.add_argument(
         "--list-models",
         action="store_true",
         help="List locally installed Ollama models and exit.",
@@ -352,6 +384,11 @@ def _parse_arguments(
     parser.add_argument("prompt", nargs="?")
     namespace = parser.parse_args(argv)
     if (
+        namespace.stall_segments is not None
+        and namespace.stall_segments < MIN_STALL_SEGMENTS
+    ):
+        parser.error("--stall-segments must be at least 2")
+    if (
         not namespace.list_models
         and not namespace.list_skills
         and not namespace.list_agents
@@ -359,6 +396,35 @@ def _parse_arguments(
     ):
         parser.error("prompt is required unless a list option is used")
     return namespace
+
+
+def _run_limits_from_arguments(
+    arguments: argparse.Namespace,
+) -> AgentRunLimits | None:
+    max_turns = cast("int | None", arguments.max_turns)
+    segment_turns = cast("int | None", arguments.segment_turns)
+    stall_segments = cast("int | None", arguments.stall_segments)
+    if all(
+        value is None
+        for value in (
+            max_turns,
+            segment_turns,
+            stall_segments,
+        )
+    ):
+        return None
+    defaults = AgentRunLimits()
+    return AgentRunLimits(
+        max_turns=max_turns,
+        segment_turns=(
+            defaults.segment_turns if segment_turns is None else segment_turns
+        ),
+        max_no_progress_segments=(
+            defaults.max_no_progress_segments
+            if stall_segments is None
+            else stall_segments
+        ),
+    )
 
 
 async def run_prompt(

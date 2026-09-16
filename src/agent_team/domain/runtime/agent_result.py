@@ -9,7 +9,9 @@ from agent_team.domain.runtime.agent_generation_metadata import (
 
 @dataclass(frozen=True, slots=True)
 class AgentResult:
-    """The final response produced by an agent."""
+    """Visible segment output and SDK-independent execution metadata."""
 
     response: str
     generation_metadata: AgentGenerationMetadata | None = None
+    segment_exhausted: bool = False
+    turns_used: int = 1

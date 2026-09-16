@@ -17,7 +17,12 @@ from agent_team.domain.runtime.agent_output_incomplete_error import (
     AgentOutputIncompleteError,
 )
 from agent_team.domain.runtime.agent_result import AgentResult
+from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
+from agent_team.domain.runtime.agent_stalled_error import AgentStalledError
 from agent_team.domain.runtime.agent_task import AgentTask
+from agent_team.domain.runtime.agent_turn_limit_error import (
+    AgentTurnLimitError,
+)
 from agent_team.domain.runtime.capability_denied_error import (
     CapabilityDeniedError,
 )
@@ -122,6 +127,167 @@ class TestCli:
         assert exit_code == 1
         assert captured.out == ""
         assert captured.err == "Ollama is unavailable.\n"
+
+    @pytest.mark.parametrize(
+        ("flags", "expected_limits"),
+        [
+            (["--max-turns", "25"], AgentRunLimits(max_turns=25)),
+            (["--segment-turns", "4"], AgentRunLimits(segment_turns=4)),
+            (
+                ["--stall-segments", "2"],
+                AgentRunLimits(max_no_progress_segments=2),
+            ),
+            (
+                [
+                    "--max-turns",
+                    "45",
+                    "--segment-turns",
+                    "8",
+                    "--stall-segments",
+                    "5",
+                ],
+                AgentRunLimits(
+                    max_turns=45,
+                    segment_turns=8,
+                    max_no_progress_segments=5,
+                ),
+            ),
+        ],
+    )
+    def test_main_passes_run_limits(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        flags: list[str],
+        expected_limits: AgentRunLimits,
+    ) -> None:
+        """Separate explicit diagnostics from segment and stall policy."""
+        received: list[AgentTask] = []
+
+        async def run_prompt(
+            task: AgentTask,
+            model: str | None = None,
+        ) -> AgentResult:
+            received.append(task)
+            assert model is None
+            return AgentResult(response="Done.")
+
+        monkeypatch.setattr(cli, "run_prompt", run_prompt)
+
+        exit_code = cli.main([*flags, "Continue working."])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert received == [
+            AgentTask(
+                prompt="Continue working.",
+                run_limits=expected_limits,
+            ),
+        ]
+        assert captured.out == "Done.\n"
+        assert captured.err == ""
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--max-turns", "0"),
+            ("--max-turns", "-1"),
+            ("--max-turns", "many"),
+            ("--segment-turns", "0"),
+            ("--segment-turns", "-1"),
+            ("--segment-turns", "many"),
+            ("--stall-segments", "0"),
+            ("--stall-segments", "1"),
+            ("--stall-segments", "many"),
+        ],
+    )
+    def test_main_rejects_invalid_run_limits(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        flag: str,
+        value: str,
+    ) -> None:
+        """Reject invalid diagnostics before creating an agent run."""
+
+        async def run_prompt(
+            _task: AgentTask,
+            _model: str | None = None,
+        ) -> AgentResult:
+            raise AssertionError("Invalid flags must not start execution.")
+
+        monkeypatch.setattr(cli, "run_prompt", run_prompt)
+
+        with pytest.raises(SystemExit) as exit_error:
+            cli.main([flag, value, "Continue working."])
+
+        captured = capsys.readouterr()
+        assert exit_error.value.code == 2
+        assert flag in captured.err
+        assert "must be" in captured.err
+        assert "Traceback" not in captured.err
+        assert captured.out == ""
+
+    @pytest.mark.parametrize(
+        ("error_type", "message"),
+        [
+            (
+                AgentStalledError,
+                "Agent stalled: repeated segments produced no progress.",
+            ),
+            (
+                AgentTurnLimitError,
+                "The explicit diagnostic turn limit was reached.",
+            ),
+        ],
+    )
+    def test_main_reports_logical_run_failures(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        error_type: type[RuntimeError],
+        message: str,
+    ) -> None:
+        """Show concise stall and explicit-limit failures without traceback."""
+
+        async def run_prompt(
+            _task: AgentTask,
+            model: str | None = None,
+        ) -> AgentResult:
+            assert model is None
+            raise error_type(message)
+
+        monkeypatch.setattr(cli, "run_prompt", run_prompt)
+
+        exit_code = cli.main(["Continue working."])
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert captured.out == ""
+        assert captured.err == f"{message}\n"
+
+    def test_main_reports_cancellation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Keep Ctrl+C cancellation explicit and distinct from failures."""
+
+        async def run_prompt(
+            _task: AgentTask,
+            model: str | None = None,
+        ) -> AgentResult:
+            assert model is None
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli, "run_prompt", run_prompt)
+
+        exit_code = cli.main(["Continue working."])
+
+        captured = capsys.readouterr()
+        assert exit_code == 130
+        assert captured.out == ""
+        assert captured.err == "Agent run cancelled.\n"
 
     def test_main_returns_error_when_workflow_mcp_cannot_start(
         self,
@@ -713,6 +879,7 @@ def _assert_task(
         "session_id": None,
         "task_id": None,
         "workspace_root": None,
+        "run_limits": None,
     }
     values.update(expected)
     assert task.prompt == values["prompt"]
@@ -721,6 +888,7 @@ def _assert_task(
     assert task.session_id == values["session_id"]
     assert task.task_id == values["task_id"]
     assert task.workspace_root == values["workspace_root"]
+    assert task.run_limits == values["run_limits"]
 
 
 def _verification_evidence() -> TaskVerificationEvidence:

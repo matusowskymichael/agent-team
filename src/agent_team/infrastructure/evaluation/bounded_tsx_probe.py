@@ -2,7 +2,9 @@
 
 The supported grammar is an exported function with one props parameter and
 one return of intrinsic JSX elements. Props may be destructured or qualified,
-with inline message/callback types. JSX expressions may reference supplied
+with inline or leading local interface/type-alias message/callback types.
+Local declarations contain only the exact supplied prop shape, without type
+composition or external resolution. JSX expressions may reference supplied
 text or callback props, or wrap a callback in a zero-argument arrow. Unknown
 syntax, extra statements, custom components and hidden elements fail closed.
 """
@@ -22,6 +24,7 @@ def probe_component(
     props: Mapping[str, str],
 ) -> ElementTree.Element:
     """Render the supported component grammar using only supplied props."""
+    source, declarations = _local_prop_declarations(source, props)
     prefix = re.match(
         rf"\s*export\s+(?:default\s+)?function\s+"
         rf"{re.escape(component_name)}\s*\(",
@@ -30,7 +33,9 @@ def probe_component(
     if prefix is None:
         raise ValueError("Required exported component is missing.")
     parameter_end = _balanced_end(source, prefix.end() - 1, "(", ")")
-    bindings = _prop_bindings(source[prefix.end() : parameter_end], props)
+    bindings = _prop_bindings(
+        source[prefix.end() : parameter_end], props, declarations
+    )
     body = source[parameter_end + 1 :].strip().removesuffix(";").strip()
     if not body.startswith("{") or _balanced_end(body, 0, "{", "}") != (
         len(body) - 1
@@ -58,9 +63,32 @@ def probe_component(
     return element
 
 
+def _local_prop_declarations(
+    source: str, props: Mapping[str, str]
+) -> tuple[str, frozenset[str]]:
+    declarations: set[str] = set()
+    while match := re.match(
+        r"\s*(?:export\s+)?(interface|type)\s+"
+        r"([A-Za-z_$][\w$]*)\s*(=\s*)?\{",
+        source,
+    ):
+        kind, name, assignment = match.groups()
+        if (kind == "type") != (assignment is not None):
+            raise ValueError("Unsupported local props declaration.")
+        if name in declarations:
+            raise ValueError("Duplicate local props declaration.")
+        start = match.end() - 1
+        end = _balanced_end(source, start, "{", "}")
+        _validate_annotation(":" + source[start : end + 1], props, frozenset())
+        declarations.add(name)
+        source = source[end + 1 :].lstrip().removeprefix(";")
+    return source, frozenset(declarations)
+
+
 def _prop_bindings(
     parameters: str,
     props: Mapping[str, str],
+    declarations: frozenset[str],
 ) -> dict[str, str]:
     parameter = parameters.strip()
     if parameter.startswith("{"):
@@ -70,17 +98,24 @@ def _prop_bindings(
             name not in props for name in names
         ):
             raise ValueError("Unsupported destructured props.")
-        _validate_annotation(parameter[end + 1 :], props)
+        _validate_annotation(parameter[end + 1 :], props, declarations)
         return {name: props[name] for name in names}
     match = re.match(r"([A-Za-z_$][\w$]*)", parameter)
     if match is None:
         raise ValueError("Unsupported props parameter.")
-    _validate_annotation(parameter[match.end() :], props)
+    _validate_annotation(parameter[match.end() :], props, declarations)
     return {f"{match.group(1)}.{name}": value for name, value in props.items()}
 
 
-def _validate_annotation(annotation: str, props: Mapping[str, str]) -> None:
+def _validate_annotation(
+    annotation: str,
+    props: Mapping[str, str],
+    declarations: frozenset[str],
+) -> None:
     if not annotation.strip():
+        return
+    named = re.fullmatch(r"\s*:\s*([A-Za-z_$][\w$]*)\s*", annotation)
+    if named is not None and named.group(1) in declarations:
         return
     fields: list[str] = []
     for name, value in props.items():
