@@ -101,9 +101,10 @@ uv run pytest --no-cov tests/unit/infrastructure/evaluation/test_bounded_tsx_pro
 ```
 
 The two targeted live evaluations are left for an explicitly requested local
-rerun using an already-installed model; they were not run for this change:
+rerun using the original, already-installed `qwen3.6:27b` model; they were
+not run for this change:
 
 ```bash
-uv run agent-team-eval run --suite backend_developer_development --case-id bd-dev-002 --candidate-model qwen3.5:9b --no-judge
-uv run agent-team-eval run --suite frontend_developer_development --case-id fd-dev-002 --candidate-model qwen3.5:9b --no-judge
+uv run agent-team-eval run --suite backend_developer_development --case-id bd-dev-002 --candidate-model qwen3.6:27b --no-judge
+uv run agent-team-eval run --suite frontend_developer_development --case-id fd-dev-002 --candidate-model qwen3.6:27b --no-judge
 ```
