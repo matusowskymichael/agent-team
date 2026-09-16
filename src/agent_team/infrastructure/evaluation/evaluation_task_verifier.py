@@ -1,8 +1,12 @@
 """Deterministic evaluation workspace verifier."""
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import cast
+from xml.etree.ElementTree import ParseError
 
 from agent_team.application.audit.audit_sanitizer import (
     hash_text,
@@ -25,8 +29,16 @@ from agent_team.domain.workflow.task_verification_outcome import (
 from agent_team.domain.workflow.task_verification_result import (
     TaskVerificationResult,
 )
+from agent_team.infrastructure.evaluation.bounded_python_probe import (
+    BoundedPythonProbe,
+)
+from agent_team.infrastructure.evaluation.bounded_tsx_probe import (
+    CALLBACK_MARKER,
+    probe_component,
+)
 
 VERIFIER_NAME = "local_workspace_checks"
+MAX_ASSERTION_SOURCE_CHARS = 20_000
 FailureClassification = (
     failure_classification.TaskVerificationFailureClassification
 )
@@ -52,6 +64,13 @@ class EvaluationTaskVerifier(TaskVerifier):
                 started_at,
                 (),
                 "Evaluation case has no expected patch path assertions.",
+            )
+
+        if _behavior_contract(self.case) is None:
+            return _blocked(
+                started_at,
+                (),
+                "Evaluation case needs a registered behavior contract.",
             )
 
         checks = _verification_checks(
@@ -116,34 +135,17 @@ def _verification_checks(
             failure_text="Expected workspace paths were unchanged or missing.",
         ),
     ]
-    symbols = _expected_symbols(case)
-    if symbols:
-        checks.append(
-            _check(
-                name=f"{check_name}:symbols",
-                passed=_symbols_present(
-                    workspace_root,
-                    expected_paths,
-                    symbols,
-                ),
-                success_text="Expected symbols are present.",
-                failure_text="Expected symbols were not present.",
+    checks.append(
+        _check(
+            name=f"{check_name}:behavior",
+            passed=(
+                task.assigned_role is case.active_role
+                and _behavior_passes(case, workspace_root)
             ),
-        )
-    markers = _expected_markers(case)
-    if markers:
-        checks.append(
-            _check(
-                name=f"{check_name}:behavior-markers",
-                passed=_markers_present(
-                    workspace_root,
-                    expected_paths,
-                    markers,
-                ),
-                success_text="Expected behavior markers are present.",
-                failure_text="Expected behavior markers were not present.",
-            ),
-        )
+            success_text="Required implementation behavior passed.",
+            failure_text="Required implementation behavior did not pass.",
+        ),
+    )
     return tuple(checks)
 
 
@@ -215,35 +217,6 @@ def _expected_paths_changed(
     return True
 
 
-def _symbols_present(
-    workspace_root: Path,
-    expected_paths: tuple[str, ...],
-    symbols: tuple[str, ...],
-) -> bool:
-    combined = _combined_content(workspace_root, expected_paths)
-    return all(_symbol_name(symbol) in combined for symbol in symbols)
-
-
-def _markers_present(
-    workspace_root: Path,
-    expected_paths: tuple[str, ...],
-    markers: tuple[str, ...],
-) -> bool:
-    combined = _combined_content(workspace_root, expected_paths).casefold()
-    return all(marker.casefold() in combined for marker in markers)
-
-
-def _combined_content(
-    workspace_root: Path,
-    expected_paths: tuple[str, ...],
-) -> str:
-    return "\n".join(
-        content
-        for path in expected_paths
-        if (content := _read_workspace_file(workspace_root, path)) is not None
-    )
-
-
 def _read_workspace_file(
     workspace_root: Path,
     path: str,
@@ -251,12 +224,15 @@ def _read_workspace_file(
     safe_path = _safe_relative_path(path)
     if safe_path is None:
         return None
-    target = workspace_root / safe_path
-    if not target.is_file():
-        return None
     try:
-        return target.read_text(encoding="utf-8")
-    except OSError:
+        root = workspace_root.resolve(strict=True)
+        target = (root / safe_path).resolve(strict=True)
+        if not target.is_relative_to(root) or not target.is_file():
+            return None
+        with target.open(encoding="utf-8") as handle:
+            source = handle.read(MAX_ASSERTION_SOURCE_CHARS + 1)
+        return source if len(source) <= MAX_ASSERTION_SOURCE_CHARS else None
+    except OSError, ValueError, UnicodeError:
         return None
 
 
@@ -265,7 +241,7 @@ def _safe_relative_path(path: str) -> Path | None:
     if pure_path.is_absolute() or ".." in pure_path.parts:
         return None
     normalized = pure_path.as_posix().strip("/")
-    if not normalized:
+    if normalized in {"", "."}:
         return None
     return Path(normalized)
 
@@ -289,17 +265,6 @@ def _expected_patch_paths(case: EvalCase) -> tuple[str, ...]:
     return tuple(dict.fromkeys(paths))
 
 
-def _expected_symbols(case: EvalCase) -> tuple[str, ...]:
-    symbols: list[str] = []
-    for call in _expected_calls(case):
-        if call.name != "find_symbol":
-            continue
-        name = call.arguments_subset.get("name")
-        if isinstance(name, str):
-            symbols.append(name)
-    return tuple(dict.fromkeys(symbols))
-
-
 def _expected_calls(case: EvalCase) -> tuple[ExpectedToolCall, ...]:
     calls = list(case.expected_tool_calls)
     for trajectory in case.acceptable_tool_trajectories:
@@ -307,27 +272,115 @@ def _expected_calls(case: EvalCase) -> tuple[ExpectedToolCall, ...]:
     return tuple(calls)
 
 
-def _expected_markers(case: EvalCase) -> tuple[str, ...]:
-    prompt = _case_text(case).casefold()
-    markers: list[str] = []
-    if "revok" in prompt:
-        markers.append("revok")
-    if "onlogout" in prompt:
-        markers.append("onLogout")
-    return tuple(markers)
+def _behavior_contract(
+    case: EvalCase,
+) -> tuple[str, Callable[[str], bool]] | None:
+    # Trusted runner code is the allow-list: datasets cannot supply code,
+    # commands or probe inputs. New/holdout cases require explicit review.
+    contracts: dict[str, tuple[str, Callable[[str], bool]]] = {
+        "bd-dev-002": ("backend/auth_service.py", _check_logout),
+        "bd-dev-004": ("backend/audit_export.py", _check_audit_export),
+        "fd-dev-002": ("frontend/AccountMenu.tsx", _check_account_menu),
+        "fd-dev-004": ("frontend/EmptyState.tsx", _check_empty_state),
+    }
+    return contracts.get(case.id)
 
 
-def _case_text(case: EvalCase) -> str:
-    task_descriptions = [
-        task.description
-        for feature in case.feature_fixtures
-        for task in feature.tasks
+def _behavior_passes(case: EvalCase, workspace_root: Path) -> bool:
+    contract = _behavior_contract(case)
+    if contract is None:
+        return False
+    path, assertion = contract
+    source = _read_workspace_file(workspace_root, path)
+    if source is None:
+        return False
+    try:
+        return assertion(source)
+    except (
+        SyntaxError,
+        ValueError,
+        KeyError,
+        TypeError,
+        RecursionError,
+        ParseError,
+    ):
+        # Unsupported candidate syntax is a deterministic failed assertion.
+        # No source, probe values or expected output enters model evidence.
+        return False
+
+
+def _check_logout(source: str) -> bool:
+    probe = BoundedPythonProbe(source, "AuthService")
+    if probe.call("logout", ("",)) is not False:
+        return False
+    expected: set[str] = set()
+    for token in ("active-session-17", "other-session-29"):
+        if probe.call("logout", (token,)) is not True:
+            return False
+        expected.add(token)
+        revoked = probe.state.get("revoked_tokens")
+        if (
+            not isinstance(revoked, (list, set))
+            or set(cast("list[object] | set[object]", revoked)) != expected
+        ):
+            return False
+    if probe.call("logout", ("",)) is not False:
+        return False
+    revoked = probe.state.get("revoked_tokens")
+    return (
+        isinstance(revoked, (list, set))
+        and set(cast("list[object] | set[object]", revoked)) == expected
+    )
+
+
+def _check_audit_export(source: str) -> bool:
+    probe = BoundedPythonProbe(source, "AuditExportFormatter")
+    samples: tuple[list[dict[str, object]], ...] = (
+        [],
+        [{"event": "login", "actor": "Zoë", "count": 2}],
+        [{"event": "logout", "metadata": {"success": True}}, {"id": 17}],
+    )
+    for events in samples:
+        expected = json.dumps(events)
+        result = probe.call("format", (events,))
+        if not isinstance(result, str) or json.loads(result) != json.loads(
+            expected,
+        ):
+            return False
+        if json.dumps(events) != expected:
+            return False
+    return True
+
+
+def _check_account_menu(source: str) -> bool:
+    rendered = probe_component(
+        source,
+        "AccountMenu",
+        {"onLogout": CALLBACK_MARKER},
+    )
+    buttons = [
+        element
+        for element in rendered.iter("button")
+        if "".join(element.itertext()).strip().casefold() == "logout"
     ]
-    return "\n".join((case.user_input, *task_descriptions))
+    callbacks = [
+        element
+        for element in rendered.iter()
+        if element.get("onClick") is not None
+    ]
+    return (
+        len(buttons) == 1
+        and callbacks == buttons
+        and buttons[0].get("onClick") == CALLBACK_MARKER
+    )
 
 
-def _symbol_name(symbol: str) -> str:
-    return symbol.rsplit(".", maxsplit=1)[-1]
+def _check_empty_state(source: str) -> bool:
+    for message in ("No invoices yet", "Nothing for Zoë & team"):
+        rendered = probe_component(source, "EmptyState", {"message": message})
+        if message not in "".join(rendered.itertext()):
+            return False
+    return True
 
 
 def _utc_now() -> datetime:

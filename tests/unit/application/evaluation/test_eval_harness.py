@@ -292,8 +292,8 @@ class TestEvalHarness:
         assert len(architect_development.cases) == 24
         assert len(architect_holdout.cases) == 5
         assert development.dataset_version == "2026-08-20.5"
-        assert backend_development.dataset_version == "2026-09-15.0"
-        assert frontend_development.dataset_version == "2026-09-15.0"
+        assert backend_development.dataset_version == "2026-09-16.0"
+        assert frontend_development.dataset_version == "2026-09-16.0"
         assert architect_development.dataset_version == "2026-08-24.1"
         assert architect_holdout.dataset_version == "2026-08-24.0"
         assert development.dataset_hash
