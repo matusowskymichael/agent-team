@@ -1,5 +1,6 @@
 """Tests for authoritative feature context building."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -185,6 +186,91 @@ class TestFeatureContextBuilder:
         assert "... [truncated]" in text
         assert "(+2 omitted)" in text
         assert "backend/path_25.py" not in text
+
+    @pytest.mark.parametrize("extra_items", (0, 2))
+    def test_legacy_handoff_rendering_respects_total_budget(
+        self,
+        extra_items: int,
+    ) -> None:
+        """Keep maximum-sized legacy collections inside the context budget."""
+        repository = FakeWorkflowRepository()
+        workflow = WorkflowService(repository)
+        feature = workflow.create_feature("Checkout", "Fast checkout.")
+        task = workflow.create_task(
+            feature.id,
+            "Build API",
+            "Backend API.",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        workflow.update_task_status(task.id, TaskStatus.IN_PROGRESS)
+        handoff = workflow.submit_task_for_verification(
+            _handoff_draft(task.id),
+        )
+        limits = DEFAULT_TASK_HANDOFF_LIMITS
+        list_counts = (
+            limits.changed_path_count,
+            limits.reused_symbol_count,
+            limits.new_symbol_count,
+            limits.checks_attempted_count,
+        )
+        collections = tuple(
+            tuple(
+                f"{index:02d}" + "x" * (limits.item_chars + extra_items - 2)
+                for index in range(count + extra_items)
+            )
+            for count in list_counts
+        )
+        legacy_handoff = replace(
+            handoff,
+            implementation_summary="s" * limits.implementation_summary_chars,
+            changed_paths=collections[0],
+            reused_symbols=collections[1],
+            new_symbols=collections[2],
+            checks_attempted=collections[3],
+            reuse_notes="r" * limits.reuse_notes_chars,
+            limitations="l" * limits.limitations_chars,
+            next_action="n" * limits.next_action_chars,
+        )
+        repository.handoffs[handoff.id] = legacy_handoff
+        builder = FeatureContextBuilder(repository)
+
+        context = builder.build_context(
+            feature_id=feature.id,
+            role=DevelopmentRole.BACKEND_DEVELOPER,
+            session_id="backend-task-1",
+            task_id=task.id,
+        )
+
+        text = context.authoritative_context
+        assert len(text) < 6500
+        for field_name, count in zip(
+            (
+                "changed_paths",
+                "reused_symbols",
+                "new_symbols",
+                "checks_attempted",
+            ),
+            list_counts,
+            strict=True,
+        ):
+            line = next(
+                line
+                for line in text.splitlines()
+                if line.startswith(f"  {field_name}:")
+            )
+            assert f"(+{count + extra_items - 2} omitted)" in line
+        assert legacy_handoff.next_action in text
+        assert "Latest verification evidence:" in text
+        assert repository.latest_task_handoff(task.id) == legacy_handoff
+        assert (
+            builder.build_context(
+                feature_id=feature.id,
+                role=DevelopmentRole.BACKEND_DEVELOPER,
+                session_id="backend-task-1",
+                task_id=task.id,
+            )
+            == context
+        )
 
     def test_bound_developer_context_includes_resume_state(self) -> None:
         """Include exact task, handoff, and verification feedback."""

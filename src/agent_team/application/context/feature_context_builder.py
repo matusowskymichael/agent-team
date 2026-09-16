@@ -315,29 +315,13 @@ def _append_handoff(
         lines.append("- not requested or no handoff exists for this task")
         return
     limits = DEFAULT_TASK_HANDOFF_LIMITS
-    changed_paths = _bounded_items(
-        handoff.changed_paths,
-        limits.changed_path_count,
-    )
     summary = _bounded_text(
         handoff.implementation_summary,
         limits.implementation_summary_chars,
     )
-    reused_symbols = _bounded_items(
-        handoff.reused_symbols,
-        limits.reused_symbol_count,
-    )
-    new_symbols = _bounded_items(
-        handoff.new_symbols,
-        limits.new_symbol_count,
-    )
     reuse_notes = _bounded_text(
         handoff.reuse_notes,
         limits.reuse_notes_chars,
-    )
-    checks_attempted = _bounded_items(
-        handoff.checks_attempted,
-        limits.checks_attempted_count,
     )
     limitations = (
         _bounded_text(handoff.limitations, limits.limitations_chars) or "none"
@@ -345,6 +329,13 @@ def _append_handoff(
     next_action = _bounded_text(
         handoff.next_action,
         limits.next_action_chars,
+    )
+    list_budget = limits.total_chars - sum(
+        len(value)
+        for value in (summary, reuse_notes, limitations, next_action)
+    )
+    changed_paths, reused_symbols, new_symbols, checks_attempted = (
+        _bounded_handoff_lists(handoff, list_budget)
     )
     lines.extend(
         (
@@ -421,6 +412,47 @@ def _verification_contract(task: DevelopmentTask) -> str:
         f"profile={contract.profile_name}; "
         f"required_checks={', '.join(contract.required_checks)}"
     )
+
+
+def _bounded_handoff_lists(
+    handoff: TaskHandoff,
+    max_chars: int,
+) -> tuple[str, ...]:
+    limits = DEFAULT_TASK_HANDOFF_LIMITS
+    collections = (
+        handoff.changed_paths,
+        handoff.reused_symbols,
+        handoff.new_symbols,
+        handoff.checks_attempted,
+    )
+    shown_counts = [
+        min(len(values), count)
+        for values, count in zip(
+            collections,
+            (
+                limits.changed_path_count,
+                limits.reused_symbol_count,
+                limits.new_symbol_count,
+                limits.checks_attempted_count,
+            ),
+            strict=True,
+        )
+    ]
+    rendered = [
+        _bounded_items(values, count)
+        for values, count in zip(collections, shown_counts, strict=True)
+    ]
+    while sum(len(value) for value in rendered) > max_chars:
+        longest = max(
+            range(len(rendered)),
+            key=lambda index: len(rendered[index]),
+        )
+        shown_counts[longest] -= 1
+        rendered[longest] = _bounded_items(
+            collections[longest],
+            shown_counts[longest],
+        )
+    return tuple(rendered)
 
 
 def _bounded_items(values: tuple[str, ...], max_count: int) -> str:
