@@ -1,6 +1,7 @@
 """Tests for Agents SDK restricted workspace tools."""
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -424,17 +425,33 @@ class TestWorkspaceToolFactory:
         assert invocation.status is ToolInvocationStatus.FAILED
         assert invocation.error_type == "WorkspaceAccessDeniedError"
 
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments_json", "error_type"),
+        [
+            ("list_files", '{"directory":""}', RuntimeError),
+            ("read_file", '{"path":"backend/auth.py"}', OSError),
+            (
+                "apply_patch",
+                '{"path":"backend/auth.py","old_text":"old","new_text":"new"}',
+                OSError,
+            ),
+            ("run_check", '{"name":"backend"}', OSError),
+        ],
+    )
     def test_unexpected_executor_failure_is_recorded(
         self,
         tmp_path: Path,
+        tool_name: str,
+        arguments_json: str,
+        error_type: type[Exception],
     ) -> None:
-        """Record unexpected workspace execution failures distinctly."""
+        """Audit and propagate infrastructure failures without retrying."""
         repository = _repository_with_task(DevelopmentRole.BACKEND_DEVELOPER)
         audit_repository = FakeAgentAuditRepository()
         factory = WorkspaceToolFactory(
             service_factory=lambda _root: WorkspaceService(
                 repository=repository,
-                executor=_ExplodingWorkspaceExecutor(),
+                executor=_ExplodingWorkspaceExecutor(error_type),
             ),
             audit_repository=audit_repository,
         )
@@ -451,16 +468,16 @@ class TestWorkspaceToolFactory:
                 run,
                 _task(DevelopmentRole.BACKEND_DEVELOPER, tmp_path),
             )
-            if item.name == "list_files"
+            if item.name == tool_name
         )
 
-        result = _invoke(tool, '{"directory":""}')
+        with pytest.raises(error_type, match="boom"):
+            _invoke(tool, arguments_json)
 
-        assert result["error_type"] == "RuntimeError"
-        assert "WORKSPACE_TOOL_FAILED" in str(result["error"])
         invocation = audit_repository.tool_invocations[1]
         assert invocation.status is ToolInvocationStatus.FAILED
-        assert invocation.error_type == "RuntimeError"
+        assert invocation.error_type == error_type.__name__
+        assert len(audit_repository.tool_invocations) == 1
 
 
 def _factory(
@@ -550,20 +567,23 @@ def _write(root: Path, relative_path: str, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+@dataclass(frozen=True, slots=True)
 class _ExplodingWorkspaceExecutor:
     """Workspace executor fake that fails during execution."""
 
+    error_type: type[Exception]
+
     def list_files(self, directory: str = "") -> WorkspaceFileListing:
-        raise RuntimeError(f"boom {directory}")
+        raise self.error_type(f"boom {directory}")
 
     def search_code(self, query: str) -> CodeSearchResult:
-        raise RuntimeError(f"boom {query}")
+        raise self.error_type(f"boom {query}")
 
     def find_symbol(self, name: str) -> SymbolSearchResult:
-        raise RuntimeError(f"boom {name}")
+        raise self.error_type(f"boom {name}")
 
     def read_file(self, path: str) -> WorkspaceFileContent:
-        raise RuntimeError(f"boom {path}")
+        raise self.error_type(f"boom {path}")
 
     def apply_patch(
         self,
@@ -571,7 +591,7 @@ class _ExplodingWorkspaceExecutor:
         old_text: str,
         new_text: str,
     ) -> PatchApplicationResult:
-        raise RuntimeError(f"boom {path} {old_text} {new_text}")
+        raise self.error_type(f"boom {path} {old_text} {new_text}")
 
     def run_check(self, name: str) -> CheckRunResult:
-        raise RuntimeError(f"boom {name}")
+        raise self.error_type(f"boom {name}")

@@ -1,6 +1,7 @@
 """Tests for workflow application service."""
 
 from dataclasses import replace
+from unittest.mock import Mock
 
 import pytest
 
@@ -22,6 +23,9 @@ from agent_team.domain.workflow.task_handoff_limits import (
     DEFAULT_TASK_HANDOFF_LIMITS,
 )
 from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.domain.workflow.task_submission_error import (
+    TaskSubmissionError,
+)
 from agent_team.domain.workflow.task_transition_error import (
     TaskTransitionError,
 )
@@ -38,6 +42,142 @@ from tests.unit.fakes.workflow.fake_workflow_repository import (
 
 class TestWorkflowService:
     """Workflow service behavior tests."""
+
+    def test_missing_feature_lookup(self) -> None:
+        """Report an absent authoritative feature rather than fabricate it."""
+        service = WorkflowService(FakeWorkflowRepository())
+
+        with pytest.raises(FeatureNotFoundError, match="404"):
+            service.get_feature(404)
+
+    def test_list_features_without_filter(self) -> None:
+        """Return every feature when no status filter is requested."""
+        service = WorkflowService(FakeWorkflowRepository())
+        first = service.create_feature("First", "Description")
+        second = service.create_feature("Second", "Description", "analysis")
+
+        assert service.list_features() == [first, second]
+
+    @pytest.mark.parametrize("operation", ["transition", "submit"])
+    def test_transition_rejects_stale_repository_state(
+        self,
+        operation: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reject concurrent state changes without reporting a mutation."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository)
+        feature = service.create_feature("Feature", "Description")
+        task = service.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+        )
+        service.update_task_status(task.id, TaskStatus.IN_PROGRESS)
+        if operation == "transition":
+            monkeypatch.setattr(
+                FakeWorkflowRepository,
+                "transition_task_status",
+                Mock(return_value=None),
+            )
+            with pytest.raises(TaskTransitionError, match="changed"):
+                service.update_task_status(task.id, TaskStatus.BLOCKED)
+        else:
+            monkeypatch.setattr(
+                FakeWorkflowRepository,
+                "submit_task_handoff",
+                Mock(return_value=None),
+            )
+            with pytest.raises(TaskSubmissionError, match="in_progress"):
+                service.submit_task_for_verification(_handoff_draft(task.id))
+
+        assert repository.latest_task_handoff(task.id) is None
+        current = repository.get_task(task.id)
+        assert current is not None
+        assert current.status is TaskStatus.IN_PROGRESS
+
+    @pytest.mark.parametrize(
+        ("assigned_role", "submitted_role", "status", "message"),
+        [
+            (
+                DevelopmentRole.QA_ENGINEER,
+                DevelopmentRole.QA_ENGINEER,
+                TaskStatus.IN_PROGRESS,
+                "cannot be submitted",
+            ),
+            (
+                DevelopmentRole.BACKEND_DEVELOPER,
+                DevelopmentRole.FRONTEND_DEVELOPER,
+                TaskStatus.IN_PROGRESS,
+                "role must match",
+            ),
+            (
+                DevelopmentRole.BACKEND_DEVELOPER,
+                DevelopmentRole.BACKEND_DEVELOPER,
+                TaskStatus.PENDING,
+                "in_progress",
+            ),
+        ],
+    )
+    def test_submission_rejects_role_and_state(
+        self,
+        assigned_role: DevelopmentRole,
+        submitted_role: DevelopmentRole,
+        status: TaskStatus,
+        message: str,
+    ) -> None:
+        """Keep submission restricted to active assigned developers."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository)
+        feature = service.create_feature("Feature", "Description")
+        task = repository.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            assigned_role,
+            status,
+        )
+        draft = replace(_handoff_draft(task.id), submitted_by=submitted_role)
+
+        with pytest.raises(TaskSubmissionError, match=message):
+            service.submit_task_for_verification(draft)
+
+        assert repository.get_task(task.id) == task
+        assert repository.latest_task_handoff(task.id) is None
+
+    @pytest.mark.parametrize(
+        ("paths", "message"),
+        [
+            ((), "must not be empty"),
+            ((" ",), "non-blank"),
+            (("p" * 241,), "item 1"),
+            (("src/app.py", " src/app.py "), "duplicates"),
+        ],
+    )
+    def test_submission_rejects_invalid_item_shapes(
+        self,
+        paths: tuple[str, ...],
+        message: str,
+    ) -> None:
+        """Reject ambiguous or unbounded changed-path provenance."""
+        repository = FakeWorkflowRepository()
+        service = WorkflowService(repository)
+        feature = service.create_feature("Feature", "Description")
+        task = repository.create_task(
+            feature.id,
+            "Task",
+            "Description",
+            DevelopmentRole.BACKEND_DEVELOPER,
+            TaskStatus.IN_PROGRESS,
+        )
+        draft = replace(_handoff_draft(task.id), changed_paths=paths)
+
+        with pytest.raises(WorkflowValidationError, match=message):
+            service.submit_task_for_verification(draft)
+
+        assert repository.latest_task_handoff(task.id) is None
+        assert repository.get_task(task.id) == task
 
     def test_workflow_operations_use_repository(self) -> None:
         """Create and read workflow records through the repository port."""

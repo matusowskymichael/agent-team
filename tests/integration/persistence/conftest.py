@@ -7,7 +7,66 @@ from pathlib import Path
 
 import pytest
 
+from agent_team.domain.runtime.development_role import DevelopmentRole
+from agent_team.domain.workflow.development_task import DevelopmentTask
+from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
+from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.infrastructure.persistence.sqlite.workflow import (
+    sqlite_workflow_repository as workflow_repository_module,
+)
 from tests.reporting.allure_steps import fixture_title
+
+
+@pytest.fixture
+def persisted_pending_task(
+    tmp_path: Path,
+) -> tuple[
+    workflow_repository_module.SQLiteWorkflowRepository, DevelopmentTask
+]:
+    """Create an assigned pending task in a disposable local database."""
+    repository = workflow_repository_module.SQLiteWorkflowRepository(
+        tmp_path / "workflow.db",
+    )
+    feature = repository.create_feature(
+        "Feature",
+        "Description",
+        FeatureStatus.IMPLEMENTATION,
+    )
+    task = repository.create_task(
+        feature.id,
+        "Task",
+        "Description",
+        DevelopmentRole.BACKEND_DEVELOPER,
+        TaskStatus.PENDING,
+    )
+    return repository, task
+
+
+@pytest.fixture
+def persisted_backend_handoff(
+    persisted_pending_task: tuple[
+        workflow_repository_module.SQLiteWorkflowRepository,
+        DevelopmentTask,
+    ],
+) -> TaskHandoffDraft:
+    """Provide a valid draft bound to the persisted backend task."""
+    _, task = persisted_pending_task
+    return TaskHandoffDraft(
+        task_id=task.id,
+        agent_run_id=1,
+        submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
+        attribution="agent:backend_developer",
+        workspace_identity_hash="workspace-hash",
+        implementation_summary="Updated the assigned backend behavior.",
+        changed_paths=("backend/auth.py",),
+        reused_symbols=("AuthService",),
+        new_symbols=(),
+        reuse_notes="Extended the existing service.",
+        checks_attempted=("backend",),
+        limitations="none",
+        next_action="verify",
+    )
 
 
 @pytest.fixture

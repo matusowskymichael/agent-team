@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import httpx2
 import pytest
+from agents import UserError
 from agents.items import ModelResponse
 from agents.usage import Usage
 from openai import APIConnectionError
@@ -14,6 +15,10 @@ from openai.types.responses import (
     ResponseOutputText,
 )
 
+from agent_team.application.runtime.agent_harness import AgentHarness
+from agent_team.domain.audit.agent_run_status import AgentRunStatus
+from agent_team.domain.audit.tool_invocation_status import ToolInvocationStatus
+from agent_team.domain.workflow.task_status import TaskStatus
 from agent_team.infrastructure.ollama.ollama_unavailable_error import (
     OllamaUnavailableError,
 )
@@ -136,13 +141,77 @@ class TestOllamaSegments:
         assert len(scenario.inputs) == 2
         assert scenario.responses == []
 
+    def test_workspace_failure_after_patch_never_replays(
+        self,
+        sdk_workspace_failure_scenario: SdkSegmentScenario,
+    ) -> None:
+        """Preserve check failures and cancellation without replaying."""
+        scenario = sdk_workspace_failure_scenario
+        repository = scenario.repository
+        assert repository is not None
+        error = scenario.workspace_error
+        assert error is not None
+        cancelled = isinstance(error, asyncio.CancelledError)
+        expected_error = asyncio.CancelledError if cancelled else UserError
+        scenario.responses.extend(
+            [
+                _sdk_tool_response(
+                    "apply_patch",
+                    '{"path":"backend/auth.py","old_text":"0","new_text":"1"}',
+                ),
+                _sdk_tool_response("run_check", '{"name":"backend"}'),
+                _sdk_final_response(),
+            ],
+        )
+        harness = AgentHarness(
+            runtime=scenario.executor,
+            audit_repository=scenario.audit,
+            workflow_repository=repository,
+        )
 
-def _sdk_tool_response(name: str) -> ModelResponse:
+        with pytest.raises(expected_error) as failure:
+            asyncio.run(harness.execute(scenario.task))
+
+        if not cancelled:
+            assert failure.value.__cause__ is error
+        assert len(scenario.inputs) == 2
+        assert len(scenario.responses) == 1
+        assert scenario.task.workspace_root is not None
+        assert (scenario.task.workspace_root / "backend/auth.py").read_text(
+            encoding="utf-8"
+        ) == "return 1\n"
+        assert scenario.task.task_id is not None
+        current = repository.get_task(scenario.task.task_id)
+        assert current is not None
+        assert current.status is TaskStatus.IN_PROGRESS
+        assert repository.latest_task_handoff(current.id) is None
+        run = scenario.audit.runs[1]
+        assert run.status is AgentRunStatus.FAILED
+        assert run.error_type == type(failure.value).__name__
+        assert run.termination_reason == (
+            "cancelled" if cancelled else "runtime_error"
+        )
+        assert run.segment_count == 1
+        invocations = scenario.audit.list_tool_invocations(run.id)
+        assert [invocation.tool_name for invocation in invocations] == [
+            "apply_patch",
+            "run_check",
+        ]
+        assert [invocation.status for invocation in invocations] == [
+            ToolInvocationStatus.COMPLETED,
+            ToolInvocationStatus.ALLOWED
+            if cancelled
+            else ToolInvocationStatus.FAILED,
+        ]
+        assert invocations[-1].error_type == (None if cancelled else "OSError")
+
+
+def _sdk_tool_response(name: str, arguments: str = "{}") -> ModelResponse:
     return ModelResponse(
         output=[
             ResponseFunctionToolCall(
                 name=name,
-                arguments="{}",
+                arguments=arguments,
                 call_id=f"call-{name}",
                 type="function_call",
             ),

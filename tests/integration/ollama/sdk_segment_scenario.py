@@ -16,6 +16,12 @@ from agent_team.infrastructure.ollama.ollama_agent_executor import (
 from agent_team.infrastructure.persistence.sqlite.sessions import (
     sqlite_session_factory,
 )
+from tests.unit.fakes.audit.fake_agent_audit_repository import (
+    FakeAgentAuditRepository,
+)
+from tests.unit.fakes.workflow.fake_workflow_repository import (
+    FakeWorkflowRepository,
+)
 
 
 @dataclass
@@ -31,3 +37,6 @@ class SdkSegmentScenario:
     responses: list[ModelResponse | BaseException]
     inputs: list[str | list[TResponseInputItem]]
     operations: list[str]
+    audit: FakeAgentAuditRepository
+    repository: FakeWorkflowRepository | None = None
+    workspace_error: BaseException | None = None

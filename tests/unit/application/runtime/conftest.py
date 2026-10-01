@@ -28,10 +28,23 @@ from agent_team.domain.workflow.task_verification_evidence import (
 from agent_team.domain.workflow.task_verification_outcome import (
     TaskVerificationOutcome,
 )
+from tests.unit.fakes.workflow.fake_workflow_repository import (
+    FakeWorkflowRepository,
+)
 
 FailureClassification = (
     failure_classification.TaskVerificationFailureClassification
 )
+
+
+@pytest.fixture
+def capability_repository(
+    progress_snapshot: AgentTaskSnapshot,
+) -> FakeWorkflowRepository:
+    """Provide an assigned task to exercise authoritative authorization."""
+    return FakeWorkflowRepository(
+        tasks={progress_snapshot.task.id: progress_snapshot.task}
+    )
 
 
 @pytest.fixture

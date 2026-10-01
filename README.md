@@ -423,7 +423,10 @@ Feature ID: 1
 Session ID: session-1
 Started: 2026-08-20T10:00:00+00:00
 Ended: 2026-08-20T10:00:03+00:00
-Max turns: 6
+Segment turns (legacy max_turns): 10
+Total turn limit: -
+Segment count: 1
+Termination reason: completed
 Prompt: Create a feature.
 Output: Created feature 1.
 Tool invocations:

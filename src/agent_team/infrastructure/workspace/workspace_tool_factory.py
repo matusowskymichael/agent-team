@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from agents import FunctionTool, Tool
+from agents.tool import set_function_tool_failure_error_function
 from agents.tool_context import ToolContext
 
 from agent_team.application.audit.audit_sanitizer import (
@@ -163,12 +164,15 @@ class WorkspaceToolFactory:
             WorkspaceToolName.RUN_CHECK: run_check,
         }
         return [
-            FunctionTool(
-                name=tool.value,
-                description=_tool_description(tool),
-                params_json_schema=_tool_schema(tool, profile),
-                on_invoke_tool=callbacks[tool],
-                strict_json_schema=True,
+            set_function_tool_failure_error_function(
+                FunctionTool(
+                    name=tool.value,
+                    description=_tool_description(tool),
+                    params_json_schema=_tool_schema(tool, profile),
+                    on_invoke_tool=callbacks[tool],
+                    strict_json_schema=True,
+                ),
+                None,
             )
             for tool in sorted(
                 profile.allowed_workspace_tools,
@@ -221,7 +225,7 @@ class WorkspaceToolFactory:
             return _denied_response(error)
         except Exception as error:
             self._mark_failed(invocation.id, error)
-            return _failed_response(error)
+            raise
 
         payload = _result_payload(result)
         result_hash, result_preview = sanitize_tool_result(tool.value, payload)
@@ -470,14 +474,6 @@ def _denied_response(
             f"{WORKSPACE_DENIED_PREFIX}: {error_message}. "
             f"{WORKSPACE_DENIED_SUFFIX}"
         ),
-        "error_type": error_type,
-    }
-
-
-def _failed_response(error: Exception) -> dict[str, object]:
-    error_type, error_message = sanitize_error(error)
-    return {
-        "error": f"WORKSPACE_TOOL_FAILED: {error_message}",
         "error_type": error_type,
     }
 

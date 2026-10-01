@@ -69,6 +69,11 @@ trusted attribution, mutation serialization, patch preconditions,
 duplicate-submission checks and deterministic verification remain enforced on
 every call. A failed provider call stops immediately; a persisted pending
 handoff remains available to the existing verification-resume path.
+Unexpected workspace infrastructure failures are audited and propagated to
+the harness. The SDK tool failure formatter is disabled so cancellation also
+stops the logical run. Neither failure starts another segment or replays a
+successful patch. Capability denials and failed patch preconditions retain
+their existing explicit tool results.
 
 Both developer skills and runtime instructions now order exact discovery,
 activation, patch, aggregate check, immediate structured submission, then

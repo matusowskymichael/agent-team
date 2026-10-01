@@ -1,5 +1,8 @@
 """Integration tests for one logical audit run across model segments."""
 
+import json
+import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,97 @@ from agent_team.infrastructure.persistence.sqlite.audit import (
 
 class TestLogicalRunAudit:
     """Persist progress independently of final logical run completion."""
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            [],
+            {"model": 123},
+            {"model": "local", "input_tokens": "invalid"},
+            {"model": "local", "visible_output_char_count": "invalid"},
+            {
+                "model": "local",
+                "visible_output_char_count": 0,
+                "objectively_truncated": "invalid",
+            },
+        ],
+    )
+    def test_corrupt_generation_metadata(
+        self,
+        legacy_audit_database: Path,
+        sqlite_connection: Callable[[Path], sqlite3.Connection],
+        metadata: dict[str, object] | list[object],
+    ) -> None:
+        """Reject malformed persisted metadata instead of inventing values."""
+        repository = audit_repository_module.SQLiteAgentAuditRepository(
+            legacy_audit_database,
+        )
+        payload: object = (
+            {
+                "model": "local",
+                "visible_output_char_count": 0,
+                "objectively_truncated": False,
+                **metadata,
+            }
+            if isinstance(metadata, dict)
+            else metadata
+        )
+        connection = sqlite_connection(legacy_audit_database)
+        connection.execute(
+            "UPDATE agent_runs SET generation_metadata_json = ? WHERE id = 1",
+            (json.dumps(payload),),
+        )
+        connection.commit()
+
+        with pytest.raises(RuntimeError, match="invalid generation metadata"):
+            repository.get_run(1)
+
+    def test_metadata_omits_optional_values(
+        self,
+        legacy_audit_database: Path,
+        sqlite_connection: Callable[[Path], sqlite3.Connection],
+    ) -> None:
+        """Read older valid metadata without optional provider fields."""
+        repository = audit_repository_module.SQLiteAgentAuditRepository(
+            legacy_audit_database,
+        )
+        connection = sqlite_connection(legacy_audit_database)
+        connection.execute(
+            "UPDATE agent_runs SET generation_metadata_json = ? WHERE id = 1",
+            (
+                json.dumps(
+                    {
+                        "model": "qwen3.5:9b",
+                        "visible_output_char_count": 0,
+                        "objectively_truncated": False,
+                    }
+                ),
+            ),
+        )
+        connection.commit()
+
+        run = repository.get_run(1)
+
+        assert run is not None
+        assert run.generation_metadata is not None
+        assert run.generation_metadata.finish_reason is None
+        assert run.generation_metadata.input_tokens is None
+        assert run.generation_metadata.output_tokens is None
+
+    def test_unknown_finalization_does_not_create_run(
+        self,
+        legacy_audit_database: Path,
+    ) -> None:
+        """Roll back failed finalization without creating an unrelated run."""
+        repository = audit_repository_module.SQLiteAgentAuditRepository(
+            legacy_audit_database,
+        )
+        before = repository.list_runs(10)
+
+        with pytest.raises(RuntimeError, match="did not return the agent run"):
+            repository.record_run_progress(404, 1, "completed")
+
+        assert repository.list_runs(10) == before
 
     @pytest.mark.parametrize("limit", [None, 25])
     def test_logical_run_progress_survives_reopening_and_completion(
