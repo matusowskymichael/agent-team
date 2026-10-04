@@ -1,6 +1,11 @@
 """Evaluation run configuration domain model."""
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
+
+from agent_team.domain.runtime.agent_watchdog_settings import (
+    AgentWatchdogSettings,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,3 +21,18 @@ class EvalRunConfig:
     infrastructure_retries: int = 1
     candidate_thinking_enabled: bool = False
     judge_thinking_enabled: bool | None = None
+    case_timeout_seconds: float = 2700.0
+    runtime_watchdogs: AgentWatchdogSettings = field(
+        default_factory=AgentWatchdogSettings,
+    )
+
+    def __post_init__(self) -> None:
+        """Require a finite positive evaluation safety deadline."""
+        if (
+            isinstance(self.case_timeout_seconds, bool)
+            or (not math.isfinite(self.case_timeout_seconds))
+            or (self.case_timeout_seconds <= 0)
+        ):
+            raise ValueError(
+                "case_timeout_seconds must be positive and finite."
+            )

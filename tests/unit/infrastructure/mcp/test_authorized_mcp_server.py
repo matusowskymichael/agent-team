@@ -47,6 +47,24 @@ from tests.unit.fakes.workflow.fake_workflow_repository import (
 class TestAuthorizedMCPServer:
     """Authorized MCP server behavior tests."""
 
+    @pytest.mark.parametrize("supported", (True, False))
+    def test_forced_cleanup_delegates_only_to_owned_process_boundary(
+        self, monkeypatch: pytest.MonkeyPatch, supported: bool
+    ) -> None:
+        """Optional cleanup preserves unsupported in-memory MCP adapters."""
+        server = _authorized_server(DevelopmentRole.BUSINESS_ANALYST)
+        cleaned: list[bool] = []
+
+        def force_cleanup() -> None:
+            cleaned.append(True)
+
+        if supported:
+            monkeypatch.setattr(
+                server.delegate, "force_cleanup", force_cleanup, raising=False
+            )
+        server.force_cleanup()
+        assert cleaned == ([True] if supported else [])
+
     @pytest.mark.parametrize(
         ("role", "expected_tool_names"),
         [

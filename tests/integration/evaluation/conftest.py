@@ -22,6 +22,9 @@ from agent_team.infrastructure.evaluation import local_candidate_agent_runner
 from agent_team.infrastructure.evaluation.json_eval_result_repository import (
     JsonEvalResultRepository,
 )
+from agent_team.infrastructure.evaluation.jsonl_golden_dataset_loader import (
+    JsonlGoldenDatasetLoader,
+)
 from agent_team.infrastructure.evaluation.local_candidate_agent_runner import (
     LocalCandidateAgentRunner,
 )
@@ -31,6 +34,16 @@ from tests.integration.evaluation.scripted_golden_orchestrator import (
     ScriptedGoldenOrchestrator,
     WorkflowRepository,
 )
+
+
+@pytest.fixture
+def eval_backend_safety_case() -> EvalCase:
+    """Load the unchanged developer golden used by cancellation regressions."""
+    suite = JsonlGoldenDatasetLoader().load(
+        "backend_developer_development",
+        Path("evals/datasets/backend_developer_development.jsonl"),
+    )
+    return next(case for case in suite.cases if case.id == "bd-dev-002")
 
 
 @pytest.fixture

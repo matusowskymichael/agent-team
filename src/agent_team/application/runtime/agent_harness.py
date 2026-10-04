@@ -1,7 +1,12 @@
 """Shared application harness for agent execution."""
 
+import asyncio
+import sys
+import time
 from asyncio import CancelledError
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
+from typing import cast
 
 from agent_team.application.audit.audit_sanitizer import (
     hash_text,
@@ -33,6 +38,7 @@ from agent_team.domain.audit.agent_audit_repository import AgentAuditRepository
 from agent_team.domain.audit.agent_run_record import AgentRunRecord
 from agent_team.domain.audit.agent_run_start import AgentRunStart
 from agent_team.domain.audit.tool_classification import ToolClassification
+from agent_team.domain.audit.tool_invocation_record import ToolInvocationRecord
 from agent_team.domain.audit.tool_invocation_status import (
     ToolInvocationStatus,
 )
@@ -41,6 +47,10 @@ from agent_team.domain.context.agent_context_envelope import (
 )
 from agent_team.domain.context.agent_context_provider import (
     AgentContextProvider,
+)
+from agent_team.domain.runtime.agent_cleanup_budget import AgentCleanupBudget
+from agent_team.domain.runtime.agent_cleanup_timeout_error import (
+    AgentCleanupTimeoutError,
 )
 from agent_team.domain.runtime.agent_executor import AgentExecutor
 from agent_team.domain.runtime.agent_implementation_status import (
@@ -56,12 +66,21 @@ from agent_team.domain.runtime.agent_output_incomplete_error import (
     AgentOutputIncompleteError,
 )
 from agent_team.domain.runtime.agent_profile import AgentProfile
+from agent_team.domain.runtime.agent_provider_timeout_error import (
+    AgentProviderTimeoutError,
+)
 from agent_team.domain.runtime.agent_result import AgentResult
 from agent_team.domain.runtime.agent_runtime import AgentRuntime
+from agent_team.domain.runtime.agent_segment_timeout_error import (
+    AgentSegmentTimeoutError,
+)
 from agent_team.domain.runtime.agent_stalled_error import AgentStalledError
 from agent_team.domain.runtime.agent_task import AgentTask
 from agent_team.domain.runtime.agent_turn_limit_error import (
     AgentTurnLimitError,
+)
+from agent_team.domain.runtime.agent_watchdog_settings import (
+    AgentWatchdogSettings,
 )
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.sessions.agent_session_metadata import (
@@ -98,6 +117,9 @@ class AgentHarness(AgentExecutor):
     skill_service: AgentSkillService | None = None
     task_verification_service: TaskVerificationService | None = None
     workflow_repository: WorkflowRepository | None = None
+    clock: Callable[[], float] = time.monotonic
+    poll_interval_seconds: float = 1.0
+    cancel_verification: Callable[[], None] | None = None
     skill_context_builder: AgentSkillContextBuilder = field(
         default_factory=AgentSkillContextBuilder,
     )
@@ -107,6 +129,13 @@ class AgentHarness(AgentExecutor):
 
     async def execute(self, task: AgentTask) -> AgentResult:
         """Run segments until useful output or verified task completion."""
+        task = replace(
+            task,
+            cleanup_budget=task.cleanup_budget
+            or AgentCleanupBudget(
+                task.watchdogs.cleanup_grace_seconds, self.clock
+            ),
+        )
         profile = self.profile_catalog.get_profile(task.role)
         if (
             profile.implementation_status
@@ -120,6 +149,9 @@ class AgentHarness(AgentExecutor):
         session = self._prepare_session(task)
         progress = AgentRunProgress(
             profile.run_limits.max_no_progress_segments,
+            watchdogs=_effective_watchdogs(task, profile),
+            cleanup_budget=task.cleanup_budget,
+            clock=self.clock,
         )
         run = self._start_run(task, profile, session)
         try:
@@ -132,9 +164,11 @@ class AgentHarness(AgentExecutor):
             )
             self._validate_output(result, run.id)
         except (CancelledError, KeyboardInterrupt) as error:
+            self._capture_final_state(task, run, progress)
             self._fail_run(run.id, progress, error, "cancelled")
             raise
         except Exception as error:
+            self._capture_final_state(task, run, progress)
             self._fail_run(run.id, progress, error, _termination_reason(error))
             raise
         self.audit_repository.record_run_progress(
@@ -191,20 +225,40 @@ class AgentHarness(AgentExecutor):
                 run.id,
                 progress.segment_count,
             )
-            result = await self.runtime.execute(
-                segment_task,
-                segment_profile,
-                run,
-                self._build_context(task, session),
-                skill_context,
-            )
+            try:
+                result = await self._await_runtime(
+                    self.runtime.execute(
+                        segment_task,
+                        segment_profile,
+                        run,
+                        self._build_context(task, session),
+                        skill_context,
+                    ),
+                    task,
+                    run,
+                    progress,
+                )
+            except (
+                AgentCleanupTimeoutError,
+                AgentProviderTimeoutError,
+                AgentSegmentTimeoutError,
+                AgentStalledError,
+            ):
+                reconciled = await self._reconcile_timeout(task, run, progress)
+                if reconciled is not None:
+                    return reconciled
+                raise
             progress.turns_used += max(1, result.turns_used)
-            verification = self._verify_pending_task(task)
+            cast("AgentCleanupBudget", task.cleanup_budget).reset()
+            verification = await self._verify_or_reconcile(task, run, progress)
+            if isinstance(verification, tuple):
+                return verification
             snapshot = self._task_snapshot(task)
             progress.observe(
                 self.audit_repository.list_tool_invocations(run.id),
                 snapshot,
             )
+            self._emit_liveness(task, progress, snapshot, "idle")
             terminal = (
                 _terminal_result(result, snapshot)
                 if progress.mutation_started or verification is not None
@@ -255,6 +309,254 @@ class AgentHarness(AgentExecutor):
                     ),
                 )
             return result, "completed"
+
+    async def _await_runtime(
+        self,
+        operation: Awaitable[AgentResult],
+        task: AgentTask,
+        run: AgentRunRecord,
+        progress: AgentRunProgress,
+    ) -> AgentResult:
+        execution = asyncio.ensure_future(_runtime_outcome(operation))
+        started_at = self.clock()
+        try:
+            while True:
+                remaining = task.watchdogs.segment_timeout_seconds - (
+                    self.clock() - started_at
+                )
+                interval = max(
+                    0.001,
+                    min(
+                        self.poll_interval_seconds,
+                        remaining,
+                        progress.convergence.advancement_remaining(),
+                    ),
+                )
+                done, _ = await asyncio.wait({execution}, timeout=interval)
+                snapshot = self._task_snapshot(task)
+                invocations = self.audit_repository.list_tool_invocations(
+                    run.id
+                )
+                progress.observe(invocations, snapshot, complete_segment=False)
+                self._emit_liveness(
+                    task, progress, snapshot, _waiting_phase(invocations)
+                )
+                if execution in done:
+                    outcome = execution.result()
+                    if isinstance(outcome, KeyboardInterrupt):
+                        raise outcome
+                    return outcome
+                progress.require_progress()
+                if (
+                    remaining <= 0
+                    or (self.clock() - started_at)
+                    >= task.watchdogs.segment_timeout_seconds
+                ):
+                    raise AgentSegmentTimeoutError(
+                        "Agent segment safety deadline reached. Mutation "
+                        "outcome may be uncertain; inspect authoritative "
+                        "task and audit state before resuming.",
+                    )
+        finally:
+            await self._drain_execution(execution, task, progress)
+            if progress.cleanup_timed_out:
+                _record_cleanup_timeout(progress, sys.exception())
+
+    async def _drain_execution[T](
+        self,
+        execution: asyncio.Future[T],
+        task: AgentTask,
+        progress: AgentRunProgress,
+    ) -> None:
+        if execution.done():
+            return
+        self._emit_liveness(
+            task, progress, self._task_snapshot(task), "cleanup"
+        )
+        execution.cancel()
+        done, _ = await asyncio.wait(
+            {execution},
+            timeout=cast(
+                "AgentCleanupBudget", task.cleanup_budget
+            ).remaining(),
+        )
+        if not done:
+            execution.cancel()
+            progress.cleanup_timed_out = True
+        if execution.done() and not execution.cancelled():
+            execution.exception()
+
+    async def _verify_with_watchdog(
+        self,
+        task: AgentTask,
+        progress: AgentRunProgress,
+        *,
+        reconciliation: bool = False,
+    ) -> TaskVerificationEvidence | None:
+        snapshot = self._task_snapshot(task)
+        if (
+            snapshot is None
+            or snapshot.task.status is not TaskStatus.VERIFICATION_PENDING
+        ):
+            return None
+        if self.task_verification_service is None:
+            return None
+        self._emit_liveness(task, progress, snapshot, "verification")
+        started_at = self.clock()
+        duration = (
+            cast("AgentCleanupBudget", task.cleanup_budget).remaining()
+            if reconciliation
+            else task.watchdogs.segment_timeout_seconds
+        )
+        if duration <= 0:
+            raise AgentSegmentTimeoutError(
+                "Cleanup budget was exhausted before safe verification; "
+                "the persisted submission remains resumable."
+            )
+        verification = asyncio.create_task(
+            asyncio.to_thread(self._verify_pending_task, task)
+        )
+        try:
+            while True:
+                remaining = duration - (self.clock() - started_at)
+                interval = max(
+                    0.001,
+                    min(
+                        self.poll_interval_seconds,
+                        remaining,
+                        remaining
+                        if reconciliation
+                        else progress.convergence.advancement_remaining(),
+                    ),
+                )
+                done, _ = await asyncio.wait({verification}, timeout=interval)
+                current = self._task_snapshot(task)
+                progress.observe([], current, complete_segment=False)
+                self._emit_liveness(task, progress, current, "verification")
+                if verification in done:
+                    return verification.result()
+                if not reconciliation:
+                    progress.require_progress()
+                if self.clock() - started_at >= duration:
+                    raise AgentSegmentTimeoutError(
+                        "Deterministic verification safety deadline reached. "
+                        "Inspect the persisted submission before resuming.",
+                    )
+        finally:
+            await self._drain_verification(verification, task, progress)
+            if progress.cleanup_timed_out:
+                _record_cleanup_timeout(progress, sys.exception())
+
+    async def _drain_verification(
+        self,
+        verification: asyncio.Future[TaskVerificationEvidence | None],
+        task: AgentTask,
+        progress: AgentRunProgress,
+    ) -> None:
+        if not verification.done():
+            if self.cancel_verification is not None:
+                self.cancel_verification()
+            self._emit_liveness(
+                task, progress, self._task_snapshot(task), "cleanup"
+            )
+            done, _ = await asyncio.wait(
+                {verification},
+                timeout=cast(
+                    "AgentCleanupBudget", task.cleanup_budget
+                ).remaining(),
+            )
+            if not done:
+                progress.cleanup_timed_out = True
+                verification.add_done_callback(_retrieve_execution_exception)
+        if verification.done() and not verification.cancelled():
+            verification.exception()
+
+    async def _verify_or_reconcile(
+        self,
+        task: AgentTask,
+        run: AgentRunRecord,
+        progress: AgentRunProgress,
+    ) -> TaskVerificationEvidence | tuple[AgentResult, str] | None:
+        try:
+            return await self._verify_with_watchdog(task, progress)
+        except AgentSegmentTimeoutError, AgentStalledError:
+            terminal = await self._reconcile_timeout(
+                task, run, progress, resume_verification=False
+            )
+            if terminal is not None:
+                return terminal
+            raise
+
+    async def _reconcile_timeout(
+        self,
+        task: AgentTask,
+        run: AgentRunRecord,
+        progress: AgentRunProgress,
+        *,
+        resume_verification: bool = True,
+    ) -> tuple[AgentResult, str] | None:
+        snapshot = self._task_snapshot(task)
+        progress.observe(
+            self.audit_repository.list_tool_invocations(run.id),
+            snapshot,
+            complete_segment=False,
+        )
+        if (
+            snapshot is not None
+            and snapshot.task.status is TaskStatus.VERIFICATION_PENDING
+            and resume_verification
+            and not progress.cleanup_timed_out
+        ):
+            try:
+                await self._verify_with_watchdog(
+                    task, progress, reconciliation=True
+                )
+            except AgentSegmentTimeoutError:
+                self._emit_liveness(
+                    task, progress, self._task_snapshot(task), "idle"
+                )
+                return None
+            snapshot = self._task_snapshot(task)
+        self._emit_liveness(
+            task,
+            progress,
+            snapshot,
+            "cleanup" if progress.cleanup_timed_out else "idle",
+        )
+        return _terminal_result(
+            AgentResult("", segment_exhausted=True), snapshot
+        )
+
+    def _capture_final_state(
+        self, task: AgentTask, run: AgentRunRecord, progress: AgentRunProgress
+    ) -> None:
+        try:
+            snapshot = self._task_snapshot(task)
+        except DevelopmentTaskNotFoundError, TaskSubmissionError:
+            snapshot = None
+        progress.observe(
+            self.audit_repository.list_tool_invocations(run.id),
+            snapshot,
+            complete_segment=False,
+        )
+        self._emit_liveness(
+            task,
+            progress,
+            snapshot,
+            "cleanup" if progress.cleanup_timed_out else "idle",
+        )
+
+    def _emit_liveness(
+        self,
+        task: AgentTask,
+        progress: AgentRunProgress,
+        snapshot: AgentTaskSnapshot | None,
+        waiting_phase: str,
+    ) -> None:
+        if task.liveness_observer is not None:
+            task.liveness_observer.observe(
+                progress.liveness_snapshot(snapshot, waiting_phase),
+            )
 
     def _task_snapshot(self, task: AgentTask) -> AgentTaskSnapshot | None:
         if not _is_bound_developer(task):
@@ -314,10 +616,18 @@ class AgentHarness(AgentExecutor):
             self.audit_repository.fail_run(
                 run_id=run_id,
                 error_type=type(error).__name__,
-                error_message=(
-                    "Agent execution cancelled."
-                    if reason == "cancelled"
-                    else sanitize_text(error)
+                error_message=sanitize_text(
+                    (
+                        "Agent execution cancelled."
+                        if reason == "cancelled"
+                        else sanitize_text(error)
+                    )
+                    + (
+                        " Cleanup exceeded its grace period; "
+                        "owned work may still be stopping."
+                        if progress.cleanup_timed_out
+                        else ""
+                    )
                 ),
             )
         except Exception as finalization_error:
@@ -491,6 +801,9 @@ def _terminal_result(
 
 def _termination_reason(error: Exception) -> str:
     reasons: tuple[tuple[type[Exception], str], ...] = (
+        (AgentCleanupTimeoutError, "cleanup_timeout"),
+        (AgentProviderTimeoutError, "provider_timeout"),
+        (AgentSegmentTimeoutError, "segment_timeout"),
         (AgentStalledError, "stalled"),
         (AgentTurnLimitError, "turn_limit"),
         (AgentOutputBlankError, "blank_output"),
@@ -507,3 +820,58 @@ def _termination_reason(error: Exception) -> str:
     }:
         return "provider_error"
     return "runtime_error"
+
+
+def _waiting_phase(invocations: Sequence[ToolInvocationRecord]) -> str:
+    return (
+        "tool"
+        if any(
+            invocation.status is ToolInvocationStatus.ALLOWED
+            for invocation in invocations
+        )
+        else "model"
+    )
+
+
+def _effective_watchdogs(
+    task: AgentTask, profile: AgentProfile
+) -> AgentWatchdogSettings:
+    if task.run_limits is not None and (
+        task.watchdogs.stagnant_segment_threshold
+        == AgentWatchdogSettings().stagnant_segment_threshold
+    ):
+        return replace(
+            task.watchdogs,
+            stagnant_segment_threshold=profile.run_limits.max_no_progress_segments,
+        )
+    return task.watchdogs
+
+
+async def _runtime_outcome(
+    operation: Awaitable[AgentResult],
+) -> AgentResult | KeyboardInterrupt:
+    """Transfer a child interruption to the owning harness for audit."""
+    try:
+        return await operation
+    except KeyboardInterrupt as interruption:
+        return interruption
+
+
+def _record_cleanup_timeout(
+    progress: AgentRunProgress, original_error: BaseException | None
+) -> None:
+    """Report bounded cleanup uncertainty without masking cancellation."""
+    progress.cleanup_timed_out = True
+    message = (
+        "Cancellation cleanup exceeded its grace period. Owned work may "
+        "still be stopping; inspect authoritative state before resuming."
+    )
+    if original_error is None:
+        raise AgentSegmentTimeoutError(message)
+    original_error.add_note(message)
+
+
+def _retrieve_execution_exception[T](execution: asyncio.Future[T]) -> None:
+    """Observe late worker failures after bounded cleanup expires."""
+    if not execution.cancelled():
+        execution.exception()

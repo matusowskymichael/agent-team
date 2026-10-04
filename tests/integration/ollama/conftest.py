@@ -1,6 +1,8 @@
 """Offline local model fixtures for real SDK execution segments."""
 
 import asyncio
+import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -8,6 +10,7 @@ from typing import cast
 import pytest
 from agents import Tool, function_tool
 from agents.items import ModelResponse, TResponseInputItem
+from agents.mcp import MCPServerStdio
 
 from agent_team.application.runtime.agent_profile_catalog import (
     AgentProfileCatalog,
@@ -24,6 +27,9 @@ from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.workflow.feature_status import FeatureStatus
 from agent_team.domain.workflow.task_status import TaskStatus
 from agent_team.domain.workspace.check_run_result import CheckRunResult
+from agent_team.infrastructure.mcp.client.owned_workflow_mcp_server import (
+    OwnedWorkflowMCPServer,
+)
 from agent_team.infrastructure.ollama.ollama_agent_executor import (
     OllamaAgentExecutor,
 )
@@ -202,4 +208,100 @@ def sdk_workspace_failure_scenario(
         audit=audit,
         repository=repository,
         workspace_error=error,
+    )
+
+
+@pytest.fixture
+def sdk_mcp_watchdog_scenario(
+    sdk_segment_scenario: SdkSegmentScenario,
+    tmp_path: Path,
+) -> SdkSegmentScenario:
+    """Run an owned real MCP process with offline SDK model inference."""
+    environment = dict(os.environ)
+    environment["AGENT_TEAM_DB_PATH"] = str(tmp_path / "workflow.db")
+    environment["PYTHONPATH"] = str(Path.cwd() / "src")
+    server = OwnedWorkflowMCPServer(
+        params={
+            "command": sys.executable,
+            "args": [
+                "-c",
+                "import os,pathlib; "
+                "pathlib.Path('mcp.pid').write_text(str(os.getpid())); "
+                "from agent_team.infrastructure.mcp.server."
+                "workflow_mcp_entrypoint import main; main()",
+            ],
+            "env": environment,
+            "cwd": tmp_path,
+        },
+        client_session_timeout_seconds=10,
+    )
+
+    def servers(
+        _profile: AgentProfile,
+        _run: AgentRunRecord,
+        _task: AgentTask,
+    ) -> tuple[MCPServerStdio, ...]:
+        return (server,)
+
+    return replace(
+        sdk_segment_scenario,
+        executor=replace(
+            sdk_segment_scenario.executor,
+            mcp_server_factory=servers,
+        ),
+    )
+
+
+@pytest.fixture
+def sdk_workspace_cancellation_scenario(
+    sdk_segment_scenario: SdkSegmentScenario,
+    tmp_path: Path,
+) -> SdkSegmentScenario:
+    """Bind a trusted cancellable workspace command to the real SDK."""
+    scenario = sdk_segment_scenario
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "auth.py").write_text("return 0\n", encoding="utf-8")
+    repository = FakeWorkflowRepository()
+    feature = repository.create_feature(
+        "Logout",
+        "Implement the assigned task.",
+        FeatureStatus.DRAFT,
+    )
+    development_task = repository.create_task(
+        feature.id,
+        "Revise logout",
+        "Implement logout.",
+        DevelopmentRole.BACKEND_DEVELOPER,
+        TaskStatus.IN_PROGRESS,
+    )
+    task = replace(
+        scenario.task, feature_id=feature.id, task_id=development_task.id
+    )
+    workspace = WorkspaceToolFactory(
+        service_factory=lambda root: WorkspaceService(
+            repository=repository,
+            executor=LocalWorkspaceExecutor(
+                root,
+                check_commands={
+                    "backend": (
+                        "python",
+                        "-c",
+                        "import os,time,pathlib; "
+                        "pathlib.Path('check.pid').write_text("
+                        "str(os.getpid())); "
+                        "time.sleep(0.2)",
+                    ),
+                },
+            ),
+        ),
+        audit_repository=scenario.audit,
+    )
+    return replace(
+        scenario,
+        task=task,
+        repository=repository,
+        executor=replace(
+            scenario.executor, workspace_tool_factory=workspace.create_tools
+        ),
     )

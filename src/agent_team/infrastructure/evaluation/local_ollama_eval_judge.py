@@ -171,6 +171,9 @@ class LocalOllamaEvalJudge:
             model=judge_model,
             max_output_tokens=self.settings.max_output_tokens,
             thinking_enabled=self.settings.thinking_enabled,
+            provider_response_timeout_seconds=(
+                self.settings.provider_response_timeout_seconds
+            ),
         )
         client = create_ollama_openai_client(judge_settings)
         response = await client.chat.completions.create(

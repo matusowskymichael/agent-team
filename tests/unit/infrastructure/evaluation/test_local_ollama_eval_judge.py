@@ -77,14 +77,18 @@ class _Client:
 class TestLocalOllamaEvalJudge:
     """LocalOllamaEvalJudge behavior tests."""
 
+    @pytest.mark.parametrize("provider_timeout_seconds", (900.0, 1200.5))
     def test_parses_valid_local_judge_output(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        provider_timeout_seconds: float,
     ) -> None:
-        """Return a validated judge grade from JSON output."""
+        """Use the configured local timeout while parsing valid JSON."""
         completions = _Completions(_valid_judge_json())
+        received_settings: list[OllamaSettings] = []
 
-        def create_client(_settings: OllamaSettings) -> _Client:
+        def create_client(settings: OllamaSettings) -> _Client:
+            received_settings.append(settings)
             return _Client(completions)
 
         monkeypatch.setattr(
@@ -94,7 +98,11 @@ class TestLocalOllamaEvalJudge:
         )
 
         grade = asyncio.run(
-            LocalOllamaEvalJudge(OllamaSettings()).grade(
+            LocalOllamaEvalJudge(
+                OllamaSettings(
+                    provider_response_timeout_seconds=provider_timeout_seconds
+                )
+            ).grade(
                 _first_case(),
                 _rubric(),
                 CandidateRunResult(
@@ -112,6 +120,11 @@ class TestLocalOllamaEvalJudge:
         assert grade.scores["least_privilege"] == 4
         assert grade.evidence["clarity"] == "observable"
         assert grade.rubric_id == _rubric().id
+        assert received_settings[0].model == "judge:local"
+        assert (
+            received_settings[0].provider_response_timeout_seconds
+            == provider_timeout_seconds
+        )
         assert completions.calls[0]["model"] == "judge:local"
         assert completions.calls[0]["temperature"] == 0
         assert "tools" not in completions.calls[0]

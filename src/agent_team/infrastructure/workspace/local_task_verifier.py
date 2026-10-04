@@ -1,7 +1,9 @@
 """Local deterministic task verifier."""
 
+import asyncio
+import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,6 +31,9 @@ from agent_team.domain.workspace.workspace_access_denied_error import (
     WorkspaceAccessDeniedError,
 )
 from agent_team.domain.workspace.workspace_executor import WorkspaceExecutor
+from agent_team.domain.workspace.workspace_operation_cancellation import (
+    WorkspaceOperationCancellation,
+)
 
 VERIFIER_NAME = "local_workspace_checks"
 FailureClassification = (
@@ -42,6 +47,19 @@ class LocalTaskVerifier(TaskVerifier):
 
     executor_factory: Callable[[Path], WorkspaceExecutor]
     verifier_name: str = VERIFIER_NAME
+    _active_executors: list[WorkspaceExecutor] = field(
+        default_factory=list[WorkspaceExecutor],
+    )
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _cancelled: threading.Event = field(default_factory=threading.Event)
+
+    def cancel_pending_operations(self) -> None:
+        """Stop owned check processes without changing workflow state."""
+        with self._lock:
+            self._cancelled.set()
+            for executor in self._active_executors:
+                if isinstance(executor, WorkspaceOperationCancellation):
+                    executor.cancel_pending_operations()
 
     def verify(
         self,
@@ -71,12 +89,22 @@ class LocalTaskVerifier(TaskVerifier):
                 error,
             )
 
-        checks, failure = _run_checks(
-            self.verifier_name,
-            started_at,
-            executor,
-            contract.required_checks,
-        )
+        with self._lock:
+            if self._cancelled.is_set():
+                raise asyncio.CancelledError
+            self._active_executors.append(executor)
+        try:
+            checks, failure = _run_checks(
+                self.verifier_name,
+                started_at,
+                executor,
+                contract.required_checks,
+            )
+            if self._cancelled.is_set():
+                raise asyncio.CancelledError
+        finally:
+            with self._lock:
+                self._active_executors.remove(executor)
         if failure is not None:
             return failure
 

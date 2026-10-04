@@ -6,9 +6,34 @@ from agent_team.domain.evaluation.eval_case import EvalCase
 from agent_team.domain.evaluation.eval_feature_fixture import (
     EvalFeatureFixture,
 )
+from agent_team.domain.evaluation.eval_suite import EvalSuite
 from agent_team.domain.evaluation.expected_tool_call import ExpectedToolCall
+from agent_team.domain.evaluation.rubric import Rubric
 from agent_team.domain.runtime.development_role import DevelopmentRole
 from agent_team.domain.workflow.feature_status import FeatureStatus
+
+
+@pytest.fixture
+def eval_safety_suite(golden_validation_case: EvalCase) -> EvalSuite:
+    """Provide one pure case for watchdog and interruption regressions."""
+    return EvalSuite(
+        id="watchdog-suite",
+        cases=(golden_validation_case,),
+        dataset_hash="reviewed-dataset",
+    )
+
+
+@pytest.fixture
+def eval_safety_rubric() -> Rubric:
+    """Provide an unused judge rubric for deterministic safety tests."""
+    return Rubric(
+        id="backend_developer_workflow",
+        version="1",
+        threshold=0.9,
+        dimensions=(),
+        content_hash="reviewed-rubric",
+        source_text="",
+    )
 
 
 @pytest.fixture

@@ -16,6 +16,7 @@ def create_ollama_openai_client(settings: OllamaSettings) -> AsyncOpenAI:
         base_url=settings.base_url,
         api_key=OLLAMA_API_KEY,
         max_retries=0,
+        timeout=settings.provider_response_timeout_seconds,
     )
 
 

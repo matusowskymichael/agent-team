@@ -32,6 +32,9 @@ from agent_team.infrastructure.persistence.sqlite.workflow import (
 from agent_team.infrastructure.workspace.local_workspace_executor import (
     LocalWorkspaceExecutor,
 )
+from tests.integration.runtime.run_completion import (
+    blocking_completion_verifier as blocking_verifier_module,
+)
 from tests.integration.runtime.run_completion.completion_operations import (
     CompletionOperations,
 )
@@ -44,6 +47,19 @@ from tests.integration.runtime.run_completion.completion_verifier import (
 from tests.integration.runtime.run_completion.run_completion_scenario import (
     RunCompletionScenario,
 )
+from tests.unit.fakes.runtime.fake_monotonic_clock import FakeMonotonicClock
+
+
+@pytest.fixture
+def blocking_verifier() -> blocking_verifier_module.BlockingCompletionVerifier:
+    """Provide a controlled verifier worker that cannot outlive the test."""
+    return blocking_verifier_module.BlockingCompletionVerifier()
+
+
+@pytest.fixture
+def verification_clock() -> FakeMonotonicClock:
+    """Provide deterministic advancement time during threaded verification."""
+    return FakeMonotonicClock()
 
 
 @pytest.fixture

@@ -1,8 +1,10 @@
 """Agents SDK function tools for restricted workspace access."""
 
+import asyncio
 import json
+import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -51,6 +53,7 @@ from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 # Any is required by the installed Agents SDK FunctionTool callable boundary.
 
 WORKSPACE_SERVER_NAME = "workspace"
+LOGGER = logging.getLogger(__name__)
 WORKSPACE_DENIED_PREFIX = "WORKSPACE_CAPABILITY_DENIED"
 WORKSPACE_DENIED_SUFFIX = (
     "Do not retry with different feature, task, role, or workspace values."
@@ -147,11 +150,10 @@ class WorkspaceToolFactory:
             _context: ToolContext[Any],
             arguments_json: str,
         ) -> dict[str, object]:
-            return self._invoke(
+            return await self._invoke_check(
                 profile,
                 run,
                 task,
-                WorkspaceToolName.RUN_CHECK,
                 arguments_json,
             )
 
@@ -179,6 +181,51 @@ class WorkspaceToolFactory:
                 key=lambda item: item.value,
             )
         ]
+
+    async def _invoke_check(
+        self,
+        profile: AgentProfile,
+        run: AgentRunRecord,
+        task: AgentTask,
+        arguments_json: str,
+    ) -> dict[str, object]:
+        if task.workspace_root is None:
+            return self._invoke(
+                profile,
+                run,
+                task,
+                WorkspaceToolName.RUN_CHECK,
+                arguments_json,
+            )
+        service = self.service_factory(task.workspace_root)
+
+        def bound_service(_root: Path) -> WorkspaceService:
+            return service
+
+        bound_factory = replace(self, service_factory=bound_service)
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                bound_factory._invoke,
+                profile,
+                run,
+                task,
+                WorkspaceToolName.RUN_CHECK,
+                arguments_json,
+            )
+        )
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            service.cancel_pending_operations()
+            done, _ = await asyncio.wait(
+                (worker,),
+                timeout=task.watchdogs.cleanup_grace_seconds,
+            )
+            if worker in done and not worker.cancelled():
+                worker.exception()
+            elif worker not in done:
+                LOGGER.warning("Workspace command cleanup did not finish.")
+            raise
 
     def _invoke(
         self,

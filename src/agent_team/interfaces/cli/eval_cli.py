@@ -6,10 +6,14 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
-from agent_team.application.audit.audit_sanitizer import sanitize_full_text
+from agent_team.application.audit.audit_sanitizer import (
+    sanitize_diagnostic_text,
+    sanitize_full_text,
+)
 from agent_team.application.evaluation.deterministic_eval_grader import (
     DeterministicEvalGrader,
 )
@@ -38,10 +42,14 @@ from agent_team.application.skills.agent_skill_context_builder import (
 from agent_team.application.skills.agent_skill_service import (
     AgentSkillService,
 )
+from agent_team.domain.evaluation.candidate_run_result import (
+    CandidateRunResult,
+)
 from agent_team.domain.evaluation.eval_case import EvalCase
 from agent_team.domain.evaluation.eval_case_result import EvalCaseResult
 from agent_team.domain.evaluation.eval_run_config import EvalRunConfig
 from agent_team.domain.evaluation.eval_run_result import EvalRunResult
+from agent_team.domain.evaluation.eval_run_status import EvalRunStatus
 from agent_team.domain.evaluation.eval_suite import EvalSuite
 from agent_team.domain.evaluation.eval_verdict import EvalVerdict
 from agent_team.domain.evaluation.human_label import HumanLabel
@@ -74,6 +82,15 @@ from agent_team.infrastructure.ollama.ollama_settings import (
 )
 from agent_team.infrastructure.skills.filesystem_agent_skill_catalog import (
     FilesystemAgentSkillCatalog,
+)
+from agent_team.interfaces.cli.agent_liveness_format import (
+    format_liveness_snapshot,
+)
+from agent_team.interfaces.cli.agent_watchdog_arguments import (
+    add_watchdog_arguments,
+    format_watchdog_settings,
+    positive_finite_seconds,
+    watchdogs_from_arguments,
 )
 from agent_team.interfaces.cli.eval_duration_format import format_duration
 from agent_team.interfaces.cli.terminal_eval_progress_reporter import (
@@ -122,7 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         RuntimeError,
         ValueError,
     ) as error:
-        print(str(error), file=sys.stderr)
+        print(sanitize_diagnostic_text(error), file=sys.stderr)
         return EXIT_SYSTEM_ERROR
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
@@ -152,6 +169,13 @@ def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     run_parser.add_argument("--no-judge", action="store_true")
     run_parser.add_argument("--no-progress", action="store_true")
+    run_parser.add_argument(
+        "--case-timeout-seconds",
+        type=positive_finite_seconds,
+        default=2700.0,
+        help="Safety deadline per candidate attempt; default: 2700 seconds.",
+    )
+    add_watchdog_arguments(run_parser, _positive_integer)
 
     show_parser = subcommands.add_parser("show")
     show_parser.add_argument("eval_run_id")
@@ -177,6 +201,7 @@ def _list_suites() -> None:
 
 
 async def _run(arguments: argparse.Namespace) -> EvalRunResult:
+    runtime_watchdogs = watchdogs_from_arguments(arguments)
     candidate_model = _candidate_model(arguments)
     judge_model = _judge_model(arguments)
     suite = JsonlGoldenDatasetLoader().load(
@@ -187,6 +212,12 @@ async def _run(arguments: argparse.Namespace) -> EvalRunResult:
     selected_suite = _selected_suite(suite, case_id)
 
     base_settings = load_ollama_settings(model_override=candidate_model)
+    base_settings = replace(
+        base_settings,
+        provider_response_timeout_seconds=(
+            runtime_watchdogs.provider_response_timeout_seconds
+        ),
+    )
     ensure_ollama_model_ready(base_settings)
     if judge_model is not None:
         ensure_ollama_model_ready(
@@ -195,6 +226,9 @@ async def _run(arguments: argparse.Namespace) -> EvalRunResult:
                 model=judge_model,
                 max_output_tokens=base_settings.max_output_tokens,
                 thinking_enabled=base_settings.thinking_enabled,
+                provider_response_timeout_seconds=(
+                    base_settings.provider_response_timeout_seconds
+                ),
             ),
         )
 
@@ -214,11 +248,18 @@ async def _run(arguments: argparse.Namespace) -> EvalRunResult:
             LocalOllamaEvalJudge(base_settings),
         )
     progress_reporter = _progress_reporter(arguments)
+    result_repository = JsonEvalResultRepository()
+    print(
+        format_watchdog_settings(
+            runtime_watchdogs, cast("float", arguments.case_timeout_seconds)
+        )
+    )
     runner = EvalRunner(
         candidate_runner=LocalCandidateAgentRunner(base_settings),
         grader=DeterministicEvalGrader(),
         judge_service=judge_service,
         progress_reporter=progress_reporter,
+        result_repository=result_repository,
         infrastructure_readiness_check=lambda: ensure_ollama_model_ready(
             base_settings,
         ),
@@ -242,12 +283,16 @@ async def _run(arguments: argparse.Namespace) -> EvalRunResult:
                 judge_thinking_enabled=None
                 if judge_model is None
                 else base_settings.thinking_enabled,
+                case_timeout_seconds=cast(
+                    "float", arguments.case_timeout_seconds
+                ),
+                runtime_watchdogs=runtime_watchdogs,
             ),
         )
     finally:
         if progress_reporter is not None:
             progress_reporter.close()
-    JsonEvalResultRepository().save(result)
+    result_repository.save(result)
     _print_run_summary(result)
     return result
 
@@ -310,6 +355,11 @@ def _show(eval_run_id: str, verbose: bool = False) -> None:
     cases = _cases_by_id(suite)
     rubric = MarkdownRubricLoader().load(_rubric_path(suite))
     _print_run_summary(result)
+    if verbose and result.active_candidate is not None:
+        print(f"Active case: {result.active_case_id or '-'}")
+        print(f"  Repetition: {result.active_repetition or '-'}")
+        print(f"  Attempt: {result.active_attempt or '-'}")
+        _print_candidate_diagnostics(result.active_candidate)
     for case_result in result.case_results:
         _print_case_detail(
             case_result,
@@ -399,6 +449,7 @@ def _load_human_labels(path: Path) -> tuple[HumanLabel, ...]:
 def _print_run_summary(result: EvalRunResult) -> None:
     counts = _summary_counts(result)
     print(f"Eval run: {result.id}")
+    print(f"Run status: {result.status.value}")
     print(f"Suite: {result.suite_id}")
     print(f"Case filter: {result.case_filter or '-'}")
     print(f"Candidate model: {result.candidate_model}")
@@ -406,6 +457,23 @@ def _print_run_summary(result: EvalRunResult) -> None:
     print(f"Judge model: {result.judge_model or '-'}")
     print(f"Judge thinking: {_optional_bool(result.judge_thinking_enabled)}")
     print(f"Duration: {format_duration(result.duration_seconds)}")
+    if (
+        result.runtime_watchdogs is not None
+        and result.case_timeout_seconds is not None
+    ):
+        print(
+            format_watchdog_settings(
+                result.runtime_watchdogs, result.case_timeout_seconds
+            )
+        )
+    if result.termination_type is not None:
+        print(
+            "Termination type: "
+            f"{sanitize_diagnostic_text(result.termination_type)}"
+        )
+    if result.termination_message is not None:
+        message = sanitize_diagnostic_text(result.termination_message)
+        print(f"Termination message: {message}")
     if result.judge_model is None:
         _print_no_judge_summary(counts)
     else:
@@ -416,6 +484,8 @@ def _print_run_summary(result: EvalRunResult) -> None:
     print("Infrastructure:")
     print(f"  retries: {counts['infrastructure_retries']}")
     print(f"  failures: {counts['infrastructure_error']}")
+    print(f"  timed_out: {counts['timed_out']}")
+    print(f"  interrupted: {counts['interrupted']}")
     for warning in result.warnings:
         print(f"Warning: {warning}")
 
@@ -423,7 +493,11 @@ def _print_run_summary(result: EvalRunResult) -> None:
 def _print_no_judge_summary(counts: dict[str, int]) -> None:
     deterministic_failed = counts["deterministic_failed"]
     deterministic_passed = (
-        counts["total"] - deterministic_failed - counts["infrastructure_error"]
+        counts["total"]
+        - deterministic_failed
+        - counts["infrastructure_error"]
+        - counts["timed_out"]
+        - counts["interrupted"]
     )
     print("Deterministic:")
     print(f"  passed: {deterministic_passed}")
@@ -433,12 +507,20 @@ def _print_no_judge_summary(counts: dict[str, int]) -> None:
     print(f"  not applicable: {counts['semantic_not_applicable']}")
     print("Overall fully evaluated:")
     print(f"  passed: {counts['passed']}")
-    print(
-        "  incomplete: "
-        f"{counts['not_judged'] + counts['infrastructure_error']}",
+    incomplete = sum(
+        counts[key]
+        for key in (
+            "not_judged",
+            "infrastructure_error",
+            "timed_out",
+            "interrupted",
+        )
     )
+    print(f"  incomplete: {incomplete}")
     print("Overall:")
     print(f"  infrastructure_error: {counts['infrastructure_error']}")
+    print(f"  timed_out: {counts['timed_out']}")
+    print(f"  interrupted: {counts['interrupted']}")
 
 
 def _print_case_detail(
@@ -452,7 +534,9 @@ def _print_case_detail(
     print(f"  Final status: {_case_status(result)}")
     deterministic = result.deterministic_grade
     deterministic_status = (
-        "not run"
+        "partial"
+        if result.verdict in {EvalVerdict.TIMED_OUT, EvalVerdict.INTERRUPTED}
+        else "not run"
         if result.verdict is EvalVerdict.INFRASTRUCTURE_ERROR
         else "passed"
         if deterministic.passed
@@ -512,6 +596,7 @@ def _print_verbose_case_detail(
     case: EvalCase | None,
     rubric: Rubric,
 ) -> None:
+    _print_candidate_diagnostics(result.candidate_result)
     print("  Candidate final response:")
     print(_indent(sanitize_full_text(result.candidate_result.final_response)))
     print(f"  Case intent: {result.intent.value}")
@@ -547,6 +632,24 @@ def _print_verbose_case_detail(
     _print_verbose_judge_detail(result)
 
 
+def _print_candidate_diagnostics(candidate: CandidateRunResult) -> None:
+    if candidate.termination_reason is not None:
+        reason = sanitize_diagnostic_text(candidate.termination_reason)
+        print(f"  Termination: {reason}")
+    if candidate.error_type is not None:
+        print(
+            f"  Error type: {sanitize_diagnostic_text(candidate.error_type)}"
+        )
+    if candidate.error_message is not None:
+        print(
+            "  Error message: "
+            f"{sanitize_diagnostic_text(candidate.error_message)}"
+        )
+    if candidate.liveness_snapshot is not None:
+        snapshot = format_liveness_snapshot(candidate.liveness_snapshot)
+        print(f"  Liveness: {snapshot}")
+
+
 def _print_verbose_judge_detail(result: EvalCaseResult) -> None:
     grade = result.judge_grade
     if grade is None:
@@ -579,6 +682,8 @@ def _require_summary_invariant(counts: dict[str, int]) -> None:
 
 def _case_status(result: EvalCaseResult) -> str:
     verdict = result.verdict
+    if verdict in {EvalVerdict.TIMED_OUT, EvalVerdict.INTERRUPTED}:
+        return verdict.value
     if verdict is EvalVerdict.INFRASTRUCTURE_ERROR:
         return "infrastructure_error"
     if verdict in {EvalVerdict.PASSED, EvalVerdict.PASS}:
@@ -595,7 +700,17 @@ def _case_status(result: EvalCaseResult) -> str:
 
 
 def _exit_code_for_result(result: EvalRunResult) -> int:
+    if result.status is EvalRunStatus.INTERRUPTED:
+        return EXIT_INTERRUPTED
+    if result.status in {
+        EvalRunStatus.RUNNING,
+        EvalRunStatus.TIMED_OUT,
+        EvalRunStatus.FAILED,
+    }:
+        return EXIT_SYSTEM_ERROR
     counts = _summary_counts(result)
+    if counts["timed_out"] or counts["interrupted"]:
+        return EXIT_SYSTEM_ERROR
     if counts["judge_error"] or counts["infrastructure_error"]:
         return EXIT_SYSTEM_ERROR
     failing = (
@@ -766,6 +881,8 @@ _CASE_STATUS_KEYS = (
     "passed",
     "deterministic_failed",
     "infrastructure_error",
+    "timed_out",
+    "interrupted",
     "not_judged",
     "judge_failed",
     "judge_error",

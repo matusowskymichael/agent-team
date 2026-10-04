@@ -145,7 +145,7 @@ class TestAgentHarnessContinuation:
 
         assert limits.max_turns is None
         assert limits.segment_turns == 10
-        assert limits.max_no_progress_segments == 3
+        assert limits.max_no_progress_segments == 4
 
     @pytest.mark.parametrize(
         ("field_name", "limit"),

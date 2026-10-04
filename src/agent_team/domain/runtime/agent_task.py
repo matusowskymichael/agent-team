@@ -1,9 +1,16 @@
 """Agent task domain model."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent_team.domain.runtime.agent_cleanup_budget import AgentCleanupBudget
+from agent_team.domain.runtime.agent_liveness_observer import (
+    AgentLivenessObserver,
+)
 from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
+from agent_team.domain.runtime.agent_watchdog_settings import (
+    AgentWatchdogSettings,
+)
 from agent_team.domain.runtime.development_role import DevelopmentRole
 
 
@@ -19,3 +26,10 @@ class AgentTask:
     workspace_root: Path | None = None
     run_limits: AgentRunLimits | None = None
     continuation_context: str | None = None
+    watchdogs: AgentWatchdogSettings = field(
+        default_factory=AgentWatchdogSettings,
+    )
+    liveness_observer: AgentLivenessObserver | None = None
+    cleanup_budget: AgentCleanupBudget | None = field(
+        default=None, repr=False, compare=False
+    )

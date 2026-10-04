@@ -28,6 +28,8 @@ from agent_team.domain.workflow.task_verification_evidence import (
 from agent_team.domain.workflow.task_verification_outcome import (
     TaskVerificationOutcome,
 )
+from tests.unit.fakes.runtime.fake_monotonic_clock import FakeMonotonicClock
+from tests.unit.fakes.runtime.fake_watchdog_runtime import FakeWatchdogRuntime
 from tests.unit.fakes.workflow.fake_workflow_repository import (
     FakeWorkflowRepository,
 )
@@ -35,6 +37,18 @@ from tests.unit.fakes.workflow.fake_workflow_repository import (
 FailureClassification = (
     failure_classification.TaskVerificationFailureClassification
 )
+
+
+@pytest.fixture
+def watchdog_runtime() -> FakeWatchdogRuntime:
+    """Provide a hanging runtime that records whether cancellation arrived."""
+    return FakeWatchdogRuntime()
+
+
+@pytest.fixture
+def fake_monotonic_clock() -> FakeMonotonicClock:
+    """Provide deterministic advancement watchdog time."""
+    return FakeMonotonicClock()
 
 
 @pytest.fixture

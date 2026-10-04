@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -36,6 +37,9 @@ from agent_team.application.workspace.workspace_service import (
 from agent_team.domain.context.agent_context_budget_exceeded_error import (
     AgentContextBudgetExceededError,
 )
+from agent_team.domain.runtime.agent_cleanup_timeout_error import (
+    AgentCleanupTimeoutError,
+)
 from agent_team.domain.runtime.agent_not_implemented_error import (
     AgentNotImplementedError,
 )
@@ -45,8 +49,14 @@ from agent_team.domain.runtime.agent_output_blank_error import (
 from agent_team.domain.runtime.agent_output_incomplete_error import (
     AgentOutputIncompleteError,
 )
+from agent_team.domain.runtime.agent_provider_timeout_error import (
+    AgentProviderTimeoutError,
+)
 from agent_team.domain.runtime.agent_result import AgentResult
 from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
+from agent_team.domain.runtime.agent_segment_timeout_error import (
+    AgentSegmentTimeoutError,
+)
 from agent_team.domain.runtime.agent_stalled_error import AgentStalledError
 from agent_team.domain.runtime.agent_task import AgentTask
 from agent_team.domain.runtime.agent_turn_limit_error import (
@@ -154,6 +164,10 @@ from agent_team.infrastructure.workspace.local_workspace_executor import (
 from agent_team.infrastructure.workspace.workspace_tool_factory import (
     WorkspaceToolFactory,
 )
+from agent_team.interfaces.cli.agent_watchdog_arguments import (
+    add_watchdog_arguments,
+    watchdogs_from_arguments,
+)
 
 from ...infrastructure.mcp.client.workflow_mcp_unavailable_error import (
     WorkflowMCPUnavailableError,
@@ -194,6 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             task_id=cast("int | None", arguments.task_id),
             workspace_root=cast("Path | None", arguments.workspace_root),
             run_limits=_run_limits_from_arguments(arguments),
+            watchdogs=watchdogs_from_arguments(arguments),
         )
         result = asyncio.run(
             run_prompt(
@@ -213,6 +228,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         AgentNotImplementedError,
         AgentStalledError,
         AgentTurnLimitError,
+        AgentProviderTimeoutError,
+        AgentSegmentTimeoutError,
+        AgentCleanupTimeoutError,
         OllamaModelCapabilityError,
         OllamaModelUnavailableError,
         OllamaUnavailableError,
@@ -284,6 +302,7 @@ def build_orchestrator(settings: OllamaSettings | None = None) -> Orchestrator:
         workspace_tool_factory=workspace_tool_factory.create_tools,
         session_factory=session_factory.create_session,
     )
+    local_verifier = LocalTaskVerifier(executor_factory=LocalWorkspaceExecutor)
     return Orchestrator(
         agent_executor=AgentHarness(
             runtime=runtime,
@@ -297,11 +316,10 @@ def build_orchestrator(settings: OllamaSettings | None = None) -> Orchestrator:
             skill_service=skill_service,
             task_verification_service=TaskVerificationService(
                 repository=workflow_repository,
-                verifier=LocalTaskVerifier(
-                    executor_factory=LocalWorkspaceExecutor,
-                ),
+                verifier=local_verifier,
                 audit_reader=audit_repository,
             ),
+            cancel_verification=local_verifier.cancel_pending_operations,
         ),
     )
 
@@ -364,7 +382,10 @@ def _parse_arguments(
     parser.add_argument(
         "--stall-segments",
         type=_positive_integer,
-        help="Segments without progress before stopping; default: 3.",
+        help="Segments without durable advancement; default: 4 (minimum 2).",
+    )
+    add_watchdog_arguments(
+        parser, _positive_integer, include_stall_segments=False
     )
     parser.add_argument(
         "--list-models",
@@ -433,6 +454,12 @@ async def run_prompt(
 ) -> AgentResult:
     """Run a prompt through the composed application orchestrator."""
     settings = load_ollama_settings(model_override=model)
+    settings = replace(
+        settings,
+        provider_response_timeout_seconds=(
+            task.watchdogs.provider_response_timeout_seconds
+        ),
+    )
     ensure_ollama_model_ready(settings)
     orchestrator = build_orchestrator(settings)
     return await orchestrator.run(task)

@@ -31,6 +31,7 @@ class CompletionVerifier:
     """Pass only after the workspace reaches the configured repair revision."""
 
     required_revision: int = 1
+    progressive_checks: bool = False
     submissions: list[TaskHandoff] = field(default_factory=list[TaskHandoff])
 
     def verify(
@@ -66,18 +67,36 @@ class CompletionVerifier:
                 else FailureClassification.CHECK_FAILED
             ),
             feedback=feedback,
-            checks=(
+            checks=tuple(
                 TaskVerificationCheckResult(
-                    name="backend:behavior",
+                    name=(
+                        f"backend:stage-{stage}"
+                        if self.progressive_checks
+                        else "backend:behavior"
+                    ),
                     started_at=timestamp,
                     ended_at=timestamp,
-                    exit_code=0 if passed else 1,
+                    exit_code=0
+                    if passed
+                    or (
+                        self.progressive_checks
+                        and any(
+                            f"return {revision}\n" in source
+                            for revision in range(
+                                stage + 1, self.required_revision + 1
+                            )
+                        )
+                    )
+                    else 1,
                     timed_out=False,
                     stdout_hash=hash_text(""),
                     stdout_excerpt="",
                     stderr_hash=hash_text(""),
                     stderr_excerpt="",
-                ),
+                )
+                for stage in range(
+                    self.required_revision if self.progressive_checks else 1
+                )
             ),
             started_at=timestamp,
             ended_at=timestamp,

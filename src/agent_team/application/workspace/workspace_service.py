@@ -26,6 +26,9 @@ from agent_team.domain.workspace.workspace_file_content import (
 from agent_team.domain.workspace.workspace_file_listing import (
     WorkspaceFileListing,
 )
+from agent_team.domain.workspace.workspace_operation_cancellation import (
+    WorkspaceOperationCancellation,
+)
 from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 
 
@@ -35,6 +38,11 @@ class WorkspaceService:
 
     repository: WorkflowRepository
     executor: WorkspaceExecutor
+
+    def cancel_pending_operations(self) -> None:
+        """Stop owned operations when the executor supports cancellation."""
+        if isinstance(self.executor, WorkspaceOperationCancellation):
+            self.executor.cancel_pending_operations()
 
     def authorize(
         self,

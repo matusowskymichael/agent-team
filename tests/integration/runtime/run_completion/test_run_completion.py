@@ -200,6 +200,7 @@ class TestRunCompletion:
         """Four failures permit a fifth meaningful repair in the same run."""
         scenario = run_completion_scenario
         scenario.verifier.required_revision = 5
+        scenario.verifier.progressive_checks = True
         scenario.runtime.segments = (
             CompletionSegment(
                 ("activate", "patch", "check", "submit"),
@@ -365,7 +366,7 @@ class TestRunCompletionStalls:
         with pytest.raises(AgentStalledError):
             asyncio.run(scenario.harness.execute(scenario.task))
 
-        assert len(scenario.runtime.tasks) == 3
+        assert len(scenario.runtime.tasks) == 4
         assert scenario.runtime.operations.revision == 0
         assert scenario.task.task_id is not None
         task = scenario.repository.get_task(scenario.task.task_id)
@@ -391,7 +392,7 @@ class TestRunCompletionStalls:
         with pytest.raises(AgentStalledError):
             asyncio.run(scenario.harness.execute(scenario.task))
 
-        assert len(scenario.runtime.tasks) == 4
+        assert len(scenario.runtime.tasks) == 5
         assert scenario.runtime.operations.revision == 0
         assert not scenario.verifier.submissions
 

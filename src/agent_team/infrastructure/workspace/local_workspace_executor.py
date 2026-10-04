@@ -32,6 +32,9 @@ from agent_team.domain.workspace.workspace_file_content import (
 from agent_team.domain.workspace.workspace_file_listing import (
     WorkspaceFileListing,
 )
+from agent_team.infrastructure.workspace.cancellable_command_runner import (
+    CancellableCommandRunner,
+)
 
 MAX_LIST_FILES = 250
 MAX_SEARCH_MATCHES = 80
@@ -164,6 +167,13 @@ class LocalWorkspaceExecutor:
         default_factory=_default_check_commands,
     )
     ignored_paths: tuple[str, ...] = field(default_factory=_empty_patterns)
+    command_runner: CancellableCommandRunner = field(
+        default_factory=CancellableCommandRunner,
+    )
+
+    def cancel_pending_operations(self) -> None:
+        """Cancel only commands owned by this trusted executor."""
+        self.command_runner.cancel_pending_operations()
 
     def list_files(self, directory: str = "") -> WorkspaceFileListing:
         """Return visible files under a workspace-relative directory."""
@@ -288,13 +298,10 @@ class LocalWorkspaceExecutor:
             )
         _validate_check_command(command)
         try:
-            completed = subprocess.run(  # noqa: S603
+            completed = self.command_runner.run(
                 command,
-                cwd=self._root(),
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=CHECK_TIMEOUT_SECONDS,
+                self._root(),
+                CHECK_TIMEOUT_SECONDS,
             )
             return CheckRunResult(
                 name=name,

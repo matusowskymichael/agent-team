@@ -1,10 +1,12 @@
 """JSON evaluation result repository."""
 
 import json
+import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import cast
 
 from agent_team.domain.evaluation.candidate_run_result import (
@@ -21,10 +23,18 @@ from agent_team.domain.evaluation.eval_context_policy import (
     EvalContextPolicy,
 )
 from agent_team.domain.evaluation.eval_run_result import EvalRunResult
+from agent_team.domain.evaluation.eval_run_status import EvalRunStatus
 from agent_team.domain.evaluation.eval_verdict import EvalVerdict
 from agent_team.domain.evaluation.judge_grade import JudgeGrade
 from agent_team.domain.evaluation.observed_skill_call import ObservedSkillCall
 from agent_team.domain.evaluation.observed_tool_call import ObservedToolCall
+from agent_team.domain.runtime.agent_lifecycle_phase import AgentLifecyclePhase
+from agent_team.domain.runtime.agent_liveness_snapshot import (
+    AgentLivenessSnapshot,
+)
+from agent_team.domain.runtime.agent_watchdog_settings import (
+    AgentWatchdogSettings,
+)
 from agent_team.domain.runtime.development_role import DevelopmentRole
 
 DEFAULT_EVAL_RESULTS_DIR = Path(".agent_team/evals")
@@ -43,9 +53,25 @@ class JsonEvalResultRepository:
     def save(self, result: EvalRunResult) -> None:
         """Persist an evaluation run result without modifying inputs."""
         path = self.directory / f"{result.id}.json"
-        path.write_text(
-            json.dumps(_run_to_dict(result), indent=2, sort_keys=True),
-        )
+        payload = json.dumps(_run_to_dict(result), indent=2, sort_keys=True)
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.directory,
+                prefix=f".{result.id}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(payload)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def get(self, result_id: str) -> EvalRunResult | None:
         """Return a saved evaluation result, if it exists."""
@@ -79,6 +105,23 @@ def _run_to_dict(result: EvalRunResult) -> dict[str, object]:
         "case_filter": result.case_filter,
         "candidate_thinking_enabled": result.candidate_thinking_enabled,
         "judge_thinking_enabled": result.judge_thinking_enabled,
+        "status": result.status.value,
+        "active_case_id": result.active_case_id,
+        "active_repetition": result.active_repetition,
+        "active_attempt": result.active_attempt,
+        "active_candidate": (
+            None
+            if result.active_candidate is None
+            else _candidate_to_dict(result.active_candidate)
+        ),
+        "termination_type": result.termination_type,
+        "termination_message": result.termination_message,
+        "case_timeout_seconds": result.case_timeout_seconds,
+        "runtime_watchdogs": (
+            None
+            if result.runtime_watchdogs is None
+            else asdict(result.runtime_watchdogs)
+        ),
         "case_results": [
             _case_result_to_dict(case_result)
             for case_result in result.case_results
@@ -131,6 +174,12 @@ def _candidate_to_dict(result: CandidateRunResult) -> dict[str, object]:
         "retry_count": result.retry_count,
         "attempts": [_attempt_to_dict(attempt) for attempt in result.attempts],
         "max_output_tokens": result.max_output_tokens,
+        "liveness_snapshot": (
+            None
+            if result.liveness_snapshot is None
+            else asdict(result.liveness_snapshot)
+        ),
+        "termination_reason": result.termination_reason,
     }
 
 
@@ -225,6 +274,21 @@ def _run_from_mapping(data: Mapping[str, object]) -> EvalRunResult:
         judge_thinking_enabled=_optional_bool_or_none(
             data.get("judge_thinking_enabled"),
         ),
+        status=EvalRunStatus(
+            _optional_text(data.get("status")) or EvalRunStatus.COMPLETED,
+        ),
+        active_case_id=_optional_text(data.get("active_case_id")),
+        active_repetition=_optional_int_or_none(data.get("active_repetition")),
+        active_attempt=_optional_int_or_none(data.get("active_attempt")),
+        active_candidate=(
+            None
+            if data.get("active_candidate") is None
+            else _candidate_from_mapping(_object(data.get("active_candidate")))
+        ),
+        termination_type=_optional_text(data.get("termination_type")),
+        termination_message=_optional_text(data.get("termination_message")),
+        case_timeout_seconds=_optional_float(data.get("case_timeout_seconds")),
+        runtime_watchdogs=_watchdogs_from_value(data.get("runtime_watchdogs")),
     )
 
 
@@ -300,6 +364,8 @@ def _candidate_from_mapping(
         max_output_tokens=_optional_int_or_none(
             data.get("max_output_tokens"),
         ),
+        liveness_snapshot=_liveness_from_value(data.get("liveness_snapshot")),
+        termination_reason=_optional_text(data.get("termination_reason")),
     )
 
 
@@ -385,6 +451,83 @@ def _object(value: object) -> Mapping[str, object]:
     if not isinstance(value, dict):
         raise ValueError("Expected JSON object.")
     return cast("Mapping[str, object]", value)
+
+
+def _liveness_from_value(value: object) -> AgentLivenessSnapshot | None:
+    if value is None:
+        return None
+    data = _object(value)
+    return AgentLivenessSnapshot(
+        segment_count=_optional_int(data.get("segment_count")),
+        turns_used=_optional_int(data.get("turns_used")),
+        task_status=_optional_text(data.get("task_status")),
+        lifecycle_phase=AgentLifecyclePhase(
+            _optional_text(data.get("lifecycle_phase"))
+            or AgentLifecyclePhase.STARTED,
+        ),
+        last_tool_name=_optional_text(data.get("last_tool_name")),
+        changed_paths=_texts(data.get("changed_paths", [])),
+        last_check_outcome=_optional_text(data.get("last_check_outcome")),
+        last_verification_outcome=_optional_text(
+            data.get("last_verification_outcome"),
+        ),
+        verification_failure_classification=_optional_text(
+            data.get("verification_failure_classification"),
+        ),
+        time_since_advancement_seconds=_setting_float(
+            data,
+            "time_since_advancement_seconds",
+            0.0,
+        ),
+        elapsed_seconds=_setting_float(data, "elapsed_seconds", 0.0),
+        waiting_phase=_optional_text(data.get("waiting_phase")) or "model",
+    )
+
+
+def _watchdogs_from_value(value: object) -> AgentWatchdogSettings | None:
+    if value is None:
+        return None
+    data = _object(value)
+    defaults = AgentWatchdogSettings()
+    return AgentWatchdogSettings(
+        provider_response_timeout_seconds=_setting_float(
+            data,
+            "provider_response_timeout_seconds",
+            defaults.provider_response_timeout_seconds,
+        ),
+        segment_timeout_seconds=_setting_float(
+            data,
+            "segment_timeout_seconds",
+            defaults.segment_timeout_seconds,
+        ),
+        no_advancement_timeout_seconds=_setting_float(
+            data,
+            "no_advancement_timeout_seconds",
+            defaults.no_advancement_timeout_seconds,
+        ),
+        stagnant_segment_threshold=_optional_int(
+            data.get("stagnant_segment_threshold"),
+            defaults.stagnant_segment_threshold,
+        ),
+        equivalent_failure_threshold=_optional_int(
+            data.get("equivalent_failure_threshold"),
+            defaults.equivalent_failure_threshold,
+        ),
+        cleanup_grace_seconds=_setting_float(
+            data,
+            "cleanup_grace_seconds",
+            defaults.cleanup_grace_seconds,
+        ),
+    )
+
+
+def _setting_float(
+    data: Mapping[str, object],
+    name: str,
+    default: float,
+) -> float:
+    value = _optional_float(data.get(name))
+    return default if value is None else value
 
 
 def _objects(value: object) -> tuple[Mapping[str, object], ...]:

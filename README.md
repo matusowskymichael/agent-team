@@ -100,7 +100,7 @@ Useful environment variables:
   server; skill tools only load reviewed local skill text and resources.
 - The shared `AgentHarness` selects the profile, prepares session/context,
   opens one logical audit run, and continues internal runtime segments while
-  objective progress is made.
+  durable task advancement is made within finite safety watchdogs.
 - Workflow data is authoritative SQLite state for features, artifacts, and
   development tasks.
 
@@ -160,9 +160,12 @@ Dependency inversion means high-level code depends on abstractions instead of
 concrete low-level implementations.
 ```
 
-Normal runs have no total-turn or wall-clock deadline. Internal SDK segments
-use ten turns; three consecutive segments without new successful operations
-or authoritative state changes raise `AgentStalledError`. A developer task
+Normal runs have no fixed total-turn count. Provider responses, SDK segments,
+and periods without durable advancement have finite safety watchdogs.
+Internal SDK segments use ten turns; four consecutive stagnant segments or
+three equivalent failed outcomes raise `AgentStalledError`. Unique reads,
+searches, and patch churn are activity; they cannot keep a run alive without
+advancing lifecycle or improving structured outcomes. A developer task
 that has begun work continues through verification and repair until it is
 completed, validly blocked, cancelled, or fails. Read-only advice can finish
 normally. See [execution policy](docs/run-to-completion.md) for progress,
@@ -170,8 +173,13 @@ context, and audit details.
 
 For an explicitly bounded diagnostic run, use `--max-turns 30`. Adjust the
 internal segment size with `--segment-turns 10`, or the consecutive no-progress
-threshold with `--stall-segments 3` (minimum two). These flags do not alter tool
-permissions or workflow bindings. Press Ctrl+C to cancel.
+threshold with `--stall-segments 4` (minimum two). Provider response,
+segment, and no-advancement defaults are 900, 1,800, and 1,800 seconds.
+Raise them explicitly with `--provider-timeout-seconds`,
+`--segment-timeout-seconds`, and `--advancement-timeout-seconds`.
+`--equivalent-failure-threshold` defaults to three; `--cleanup-grace-seconds`
+is positive and at most ten. These flags preserve tool permissions and
+workflow bindings. Press Ctrl+C to cancel and exit with status 130.
 
 Equivalent package entrypoint:
 
@@ -456,6 +464,21 @@ The evaluation CLI is also human-only. It runs golden cases from `evals/`,
 stores results in `.agent_team/evals/`, and can compare or calibrate previous
 runs.
 
+Each candidate attempt has an enabled 2,700-second deadline. Use
+`--case-timeout-seconds` to raise it explicitly; runtime watchdog flags above
+are also available. All durations must be positive and finite. Effective
+watchdog settings print before execution. Timeout is separate from quality or
+connection failure and is not retried as infrastructure failure.
+
+The run ID and atomic checkpoints are saved before execution, after each
+attempt/case, and on timeout or Ctrl+C. Historical results remain readable;
+inspect a `running`, `interrupted`, `timed_out`, or `failed` result with
+`uv run agent-team-eval show RUN_ID --verbose` to see its saved status and
+sanitized lifecycle/termination metadata. Interactive heartbeats show segment,
+task status, lifecycle, waiting phase, last safe operation, time since durable
+advancement, and case deadline/remaining time at least every thirty seconds.
+Use `--no-progress` to suppress interactive updates.
+
 List available suites:
 
 ```bash
@@ -645,9 +668,10 @@ Evaluation exit codes:
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | All fully evaluated cases passed, or a read-only eval command succeeded. |
+| `0` | Requested checks passed, including deterministic-only `--no-judge` runs, or a read-only eval command succeeded. |
 | `1` | A quality gate failed. |
-| `2` | A system/configuration error occurred. |
+| `2` | A system/configuration error or safety timeout occurred. |
+| `130` | The user cancelled; an interrupted checkpoint was saved. |
 
 ### Workflow MCP Server
 

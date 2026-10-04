@@ -1,5 +1,6 @@
 """Tests for the local deterministic task verifier."""
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -46,6 +47,7 @@ class _FakeExecutor:
         result: CheckRunResult | None = None,
         error: Exception | None = None,
         fail_on_check: str | None = None,
+        on_check: Callable[[], None] | None = None,
     ) -> None:
         self.result = result or CheckRunResult(
             name="backend",
@@ -57,10 +59,13 @@ class _FakeExecutor:
         self.error = error
         self.fail_on_check = fail_on_check
         self.received_names: list[str] = []
+        self.on_check = on_check
 
     def run_check(self, name: str) -> CheckRunResult:
         """Return or raise the configured check result."""
         self.received_names.append(name)
+        if self.on_check is not None:
+            self.on_check()
         if self.error is not None:
             raise self.error
         return replace(
@@ -74,6 +79,28 @@ class _FakeExecutor:
 
 class TestLocalTaskVerifier:
     """LocalTaskVerifier behavior tests."""
+
+    def test_cancelled_verification_does_not_start_checks(self) -> None:
+        """A queued verification cancelled before execution stays pending."""
+        executor = _FakeExecutor()
+        verifier = LocalTaskVerifier(executor_factory=_factory(executor))
+        verifier.cancel_pending_operations()
+
+        with pytest.raises(asyncio.CancelledError):
+            verifier.verify(_task(), _handoff(), Path("workspace"))
+
+        assert executor.received_names == []
+
+    def test_cancelled_check_cannot_return_passing_verification(self) -> None:
+        """Cancellation prevents finalization even when a check just passed."""
+        executor = _FakeExecutor()
+        verifier = LocalTaskVerifier(executor_factory=_factory(executor))
+        executor.on_check = verifier.cancel_pending_operations
+
+        with pytest.raises(asyncio.CancelledError):
+            verifier.verify(_task(), _handoff(), Path("workspace"))
+
+        assert executor.received_names == list(BACKEND_REQUIRED_CHECKS)
 
     @pytest.mark.parametrize(
         ("role", "required_checks"),

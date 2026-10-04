@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from agents.mcp import MCPServerStdio, MCPServerStdioParams
+from agents.mcp import MCPServerStdioParams
 from agents.mcp.util import create_static_tool_filter
 
 from agent_team.infrastructure.mcp.client import (
@@ -14,6 +14,9 @@ from agent_team.infrastructure.mcp.client.authorized_mcp_server import (
 )
 from agent_team.infrastructure.mcp.client.development_workflow_mcp_server_config import (  # noqa: E501
     DevelopmentWorkflowMCPServerConfig,
+)
+from agent_team.infrastructure.mcp.client.owned_workflow_mcp_server import (
+    OwnedWorkflowMCPServer,
 )
 
 DEVELOPMENT_WORKFLOW_MCP_NAME = "development_workflow"
@@ -48,7 +51,7 @@ def create_development_workflow_mcp_server(
     allowed_tool_names = sorted(
         tool.value for tool in config.profile.allowed_tools
     )
-    delegate = MCPServerStdio(
+    delegate = OwnedWorkflowMCPServer(
         params=parameters,
         cache_tools_list=True,
         name=DEVELOPMENT_WORKFLOW_MCP_NAME,

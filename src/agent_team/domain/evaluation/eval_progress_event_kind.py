@@ -13,3 +13,4 @@ class EvalProgressEventKind(StrEnum):
     CASE_COMPLETED = "case_completed"
     RUN_FINISHED = "run_finished"
     RUN_CANCELLED = "run_cancelled"
+    HEARTBEAT = "heartbeat"

@@ -11,7 +11,7 @@ class AgentRunLimits:
 
     max_turns: int | None = None
     segment_turns: int = 10
-    max_no_progress_segments: int = 3
+    max_no_progress_segments: int = 4
 
     def __post_init__(self) -> None:
         """Validate run limits."""

@@ -10,6 +10,9 @@ from agent_team.domain.evaluation.observed_skill_call import (
     ObservedSkillCall,
 )
 from agent_team.domain.evaluation.observed_tool_call import ObservedToolCall
+from agent_team.domain.runtime.agent_liveness_snapshot import (
+    AgentLivenessSnapshot,
+)
 from agent_team.domain.runtime.development_role import DevelopmentRole
 
 
@@ -31,3 +34,5 @@ class CandidateRunResult:
     retry_count: int = 0
     attempts: tuple[EvalAttemptResult, ...] = ()
     max_output_tokens: int | None = None
+    liveness_snapshot: AgentLivenessSnapshot | None = None
+    termination_reason: str | None = None

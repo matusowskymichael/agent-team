@@ -22,6 +22,22 @@ class AgentTaskSnapshot:
     handoff: TaskHandoff | None
     verification: TaskVerificationEvidence | None
 
+    def verification_state(self) -> tuple[object, ...]:
+        """Return stable structured verification outcomes without row IDs."""
+        evidence = self.verification
+        if evidence is None:
+            return ()
+        return (
+            evidence.outcome.value,
+            evidence.failure_classification.value,
+            tuple(
+                sorted(
+                    (check.name, check.exit_code, check.timed_out)
+                    for check in evidence.checks
+                )
+            ),
+        )
+
     def fingerprint(self) -> str:
         """Identify semantic state without row IDs or timestamps."""
         handoff = self.handoff

@@ -37,7 +37,7 @@ class TestAgentRunProgress:
         self,
         progress_invocation: ToolInvocationRecord,
     ) -> None:
-        """Arbitrarily many new results each reset consecutive inactivity."""
+        """Arbitrarily many new results remain activity without convergence."""
         progress = AgentRunProgress(3)
         for index in range(50):
             progress.observe([], None)
@@ -50,8 +50,9 @@ class TestAgentRunProgress:
                 ],
                 None,
             )
-            progress.require_progress()
             assert progress.no_progress_segments == 0
+        with pytest.raises(AgentStalledError, match="advancement"):
+            progress.require_progress()
 
     def test_repeated_calls_and_results_ignore_new_audit_ids(
         self,
@@ -285,6 +286,43 @@ class TestAgentRunProgress:
         assert "private-arguments" not in context
         assert "private-check-output" not in context
 
+    def test_new_patch_invalidates_current_revision_check_summary(
+        self, progress_invocation: ToolInvocationRecord
+    ) -> None:
+        """Do not present a previous revision's passing check as current."""
+        progress = AgentRunProgress(4)
+        progress.observe(
+            [
+                replace(
+                    progress_invocation,
+                    tool_name="run_check",
+                    result_preview=json.dumps(
+                        {"name": "backend", "exit_code": 0, "timed_out": False}
+                    ),
+                ),
+                replace(
+                    progress_invocation,
+                    id=2,
+                    tool_name="apply_patch",
+                    classification=ToolClassification.MUTATING,
+                    result_preview=json.dumps(
+                        {
+                            "path": "backend/auth.py",
+                            "applied": True,
+                            "before_hash": "before",
+                            "after_hash": "after",
+                        }
+                    ),
+                ),
+            ],
+            None,
+        )
+
+        context = progress.continuation_context(None)
+
+        assert "Completed trusted checks: 0" in context
+        assert "run the required aggregate check for this revision" in context
+
     @pytest.mark.parametrize(
         ("status", "mutation_started"),
         [
@@ -392,7 +430,7 @@ class TestAgentRunProgress:
                 [
                     replace(
                         progress_invocation,
-                        id=index * 2,
+                        id=index,
                         tool_name="apply_patch",
                         classification=ToolClassification.MUTATING,
                         result_preview=json.dumps(
@@ -406,7 +444,7 @@ class TestAgentRunProgress:
                     ),
                     replace(
                         progress_invocation,
-                        id=index * 2 + 1,
+                        id=40 + index,
                         tool_name="run_check",
                         arguments_hash=str(index),
                         result_preview=json.dumps(

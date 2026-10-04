@@ -13,11 +13,15 @@ from agent_team.domain.evaluation.eval_progress_event import (
 from agent_team.domain.evaluation.eval_progress_event_kind import (
     EvalProgressEventKind,
 )
+from agent_team.interfaces.cli.agent_liveness_format import (
+    format_liveness_snapshot,
+)
 from agent_team.interfaces.cli.eval_duration_format import format_duration
 
 BAR_WIDTH = 20
 MIN_REFRESH_INTERVAL_SECONDS = 0.1
 SPINNER_FRAMES = ("|", "/", "-", "\\")
+REFRESH_CLEANUP_SECONDS = 1.0
 
 
 @dataclass(slots=True)
@@ -47,8 +51,14 @@ class TerminalEvalProgressReporter:
         """Render one progress event."""
         if not self.enabled:
             return
+        terminal = event.kind in {
+            EvalProgressEventKind.RUN_FINISHED,
+            EvalProgressEventKind.RUN_CANCELLED,
+        }
+        if terminal:
+            self._stop_refresh()
         with self._lock:
-            self._current_event = event
+            self._current_event = None if terminal else event
             self._event_received_at = self.monotonic()
             if self.interactive:
                 self._report_interactive(event)
@@ -67,6 +77,7 @@ class TerminalEvalProgressReporter:
         """Stop background refresh and clear any active progress line."""
         self._stop_refresh()
         with self._lock:
+            self._current_event = None
             if self.enabled and self.interactive:
                 self._clear_line()
 
@@ -129,7 +140,7 @@ class TerminalEvalProgressReporter:
         if thread is None:
             return
         self._stop_event.set()
-        thread.join()
+        thread.join(timeout=REFRESH_CLEANUP_SECONDS)
         self._thread = None
 
     def _refresh_loop(self) -> None:
@@ -151,7 +162,8 @@ def _interactive_line(
         f"{event.completed_cases}/{event.total_cases} | "
         f"{event.case_id or '-'} | {_phase_label(event)} | "
         f"elapsed {format_duration(elapsed_seconds)} | "
-        f"{_eta_label(event)} | {spinner}"
+        f"{_eta_label(event)}{_liveness_label(event, elapsed_seconds)} | "
+        f"{spinner}"
     )
 
 
@@ -165,6 +177,12 @@ def _non_interactive_line(event: EvalProgressEvent) -> str | None:
         )
     elif event.kind is EvalProgressEventKind.INFRASTRUCTURE_RETRY:
         line = f"{event.case_id or '-'} | {_infrastructure_retry_label(event)}"
+    elif event.kind is EvalProgressEventKind.HEARTBEAT:
+        line = (
+            f"{event.case_id or '-'} | {_phase_label(event)} | "
+            f"elapsed {format_duration(event.elapsed_seconds)}"
+            f"{_liveness_label(event, event.elapsed_seconds)}"
+        )
     elif event.kind is EvalProgressEventKind.CASE_COMPLETED:
         duration = format_duration(event.case_duration_seconds)
         line = (
@@ -182,6 +200,27 @@ def _non_interactive_line(event: EvalProgressEvent) -> str | None:
     else:
         line = None
     return line
+
+
+def _liveness_label(event: EvalProgressEvent, elapsed_seconds: float) -> str:
+    elapsed_since_event = max(0.0, elapsed_seconds - event.elapsed_seconds)
+    labels: list[str] = []
+    if event.liveness_snapshot is not None:
+        labels.append(
+            format_liveness_snapshot(
+                event.liveness_snapshot, elapsed_since_event
+            )
+        )
+    if event.case_timeout_seconds is not None:
+        labels.append(
+            f"case deadline {format_duration(event.case_timeout_seconds)}"
+        )
+    if event.case_remaining_seconds is not None:
+        remaining = max(
+            0.0, event.case_remaining_seconds - elapsed_since_event
+        )
+        labels.append(f"remaining {format_duration(remaining)}")
+    return " | " + " | ".join(labels) if labels else ""
 
 
 def _phase_label(event: EvalProgressEvent) -> str:

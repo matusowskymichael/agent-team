@@ -10,18 +10,30 @@ import pytest
 
 from agent_team.application.runtime.agent_harness import AgentHarness
 from agent_team.application.runtime.orchestrator import Orchestrator
+from agent_team.domain.runtime.agent_cleanup_timeout_error import (
+    AgentCleanupTimeoutError,
+)
 from agent_team.domain.runtime.agent_output_blank_error import (
     AgentOutputBlankError,
 )
 from agent_team.domain.runtime.agent_output_incomplete_error import (
     AgentOutputIncompleteError,
 )
+from agent_team.domain.runtime.agent_provider_timeout_error import (
+    AgentProviderTimeoutError,
+)
 from agent_team.domain.runtime.agent_result import AgentResult
 from agent_team.domain.runtime.agent_run_limits import AgentRunLimits
+from agent_team.domain.runtime.agent_segment_timeout_error import (
+    AgentSegmentTimeoutError,
+)
 from agent_team.domain.runtime.agent_stalled_error import AgentStalledError
 from agent_team.domain.runtime.agent_task import AgentTask
 from agent_team.domain.runtime.agent_turn_limit_error import (
     AgentTurnLimitError,
+)
+from agent_team.domain.runtime.agent_watchdog_settings import (
+    AgentWatchdogSettings,
 )
 from agent_team.domain.runtime.capability_denied_error import (
     CapabilityDeniedError,
@@ -77,6 +89,73 @@ class _FakeTaskVerificationService:
 
 class TestCli:
     """CLI behavior tests."""
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        (
+            ("--provider-timeout-seconds", "0"),
+            ("--provider-timeout-seconds", "nan"),
+            ("--segment-timeout-seconds", "inf"),
+            ("--advancement-timeout-seconds", "-1"),
+            ("--cleanup-grace-seconds", "11"),
+            ("--equivalent-failure-threshold", "0"),
+        ),
+    )
+    def test_runtime_watchdog_invalid_values_never_start_execution(
+        self, capsys: pytest.CaptureFixture[str], flag: str, value: str
+    ) -> None:
+        """Keep watchdogs enabled and cleanup within ten seconds."""
+        with pytest.raises(SystemExit) as error:
+            cli.main([flag, value, "Continue working."])
+        assert error.value.code == 2
+        assert flag in capsys.readouterr().err
+
+    def test_runtime_watchdog_overrides_reach_trusted_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Permit larger explicit safety bounds without a total turn cap."""
+        received: list[AgentTask] = []
+
+        async def run_prompt(
+            task: AgentTask, model: str | None = None
+        ) -> AgentResult:
+            assert model is None
+            received.append(task)
+            return AgentResult(response="Done.")
+
+        monkeypatch.setattr(cli, "run_prompt", run_prompt)
+        assert (
+            cli.main(
+                [
+                    "--provider-timeout-seconds",
+                    "1200.5",
+                    "--segment-timeout-seconds",
+                    "3600",
+                    "--advancement-timeout-seconds",
+                    "3600",
+                    "--stall-segments",
+                    "8",
+                    "--equivalent-failure-threshold",
+                    "5",
+                    "--cleanup-grace-seconds",
+                    "5",
+                    "Continue working.",
+                ]
+            )
+            == 0
+        )
+        task = received[0]
+        assert task.watchdogs.provider_response_timeout_seconds == 1200.5
+        assert task.watchdogs.segment_timeout_seconds == 3600
+        assert task.watchdogs.no_advancement_timeout_seconds == 3600
+        assert task.watchdogs.stagnant_segment_threshold == 8
+        assert task.watchdogs.equivalent_failure_threshold == 5
+        assert task.watchdogs.cleanup_grace_seconds == 5
+        assert task.run_limits is not None
+        assert task.run_limits.max_turns is None
+        assert capsys.readouterr().out == "Done.\n"
 
     def test_main_prints_agent_response(
         self,
@@ -182,6 +261,11 @@ class TestCli:
             AgentTask(
                 prompt="Continue working.",
                 run_limits=expected_limits,
+                watchdogs=AgentWatchdogSettings(
+                    stagnant_segment_threshold=(
+                        expected_limits.max_no_progress_segments
+                    ),
+                ),
             ),
         ]
         assert captured.out == "Done.\n"
@@ -231,6 +315,9 @@ class TestCli:
     @pytest.mark.parametrize(
         ("error_type", "message"),
         [
+            (AgentProviderTimeoutError, "Local provider response timed out."),
+            (AgentSegmentTimeoutError, "Internal segment timed out."),
+            (AgentCleanupTimeoutError, "Owned resource cleanup timed out."),
             (
                 AgentStalledError,
                 "Agent stalled: repeated segments produced no progress.",

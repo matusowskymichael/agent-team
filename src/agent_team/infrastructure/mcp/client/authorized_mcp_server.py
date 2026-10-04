@@ -35,6 +35,9 @@ from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 from agent_team.infrastructure.mcp.client.development_workflow_mcp_server_config import (  # noqa: E501
     DevelopmentWorkflowMCPServerConfig,
 )
+from agent_team.infrastructure.mcp.client.mcp_process_cleanup import (
+    MCPProcessCleanup,
+)
 
 # Any is required by the installed Agents SDK MCPServer abstract methods.
 # The installed MCP Tool schema uses dict[str, Any], so schema boundary casts
@@ -119,6 +122,11 @@ class AuthorizedMCPServer(MCPServer):
     async def cleanup(self) -> None:
         """Clean up the delegate server."""
         await self.delegate.cleanup()
+
+    def force_cleanup(self) -> None:
+        """Terminate the owned delegate process without replaying tools."""
+        if isinstance(self.delegate, MCPProcessCleanup):
+            self.delegate.force_cleanup()
 
     async def list_tools(
         self,

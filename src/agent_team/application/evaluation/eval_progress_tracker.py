@@ -17,6 +17,9 @@ from agent_team.domain.evaluation.eval_progress_reporter import (
 )
 from agent_team.domain.evaluation.eval_run_config import EvalRunConfig
 from agent_team.domain.evaluation.eval_suite import EvalSuite
+from agent_team.domain.runtime.agent_liveness_snapshot import (
+    AgentLivenessSnapshot,
+)
 
 
 @dataclass(slots=True)
@@ -144,6 +147,32 @@ class EvalProgressTracker:
     def run_cancelled(self) -> None:
         """Report evaluation cancellation."""
         self._report(EvalProgressEventKind.RUN_CANCELLED)
+
+    def heartbeat(
+        self,
+        case: EvalCase,
+        repetition: int,
+        snapshot: AgentLivenessSnapshot | None,
+        attempt_started_at: float,
+    ) -> None:
+        """Emit bounded active-candidate metadata without changing state."""
+        self._emit(
+            replace(
+                self._event(
+                    EvalProgressEventKind.HEARTBEAT,
+                    case,
+                    repetition,
+                    EvalPhase.CANDIDATE,
+                ),
+                liveness_snapshot=snapshot,
+                case_timeout_seconds=self.config.case_timeout_seconds,
+                case_remaining_seconds=max(
+                    0.0,
+                    self.config.case_timeout_seconds
+                    - self.elapsed_since(attempt_started_at),
+                ),
+            )
+        )
 
     def _report(
         self,

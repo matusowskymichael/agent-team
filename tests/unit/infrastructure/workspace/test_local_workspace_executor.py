@@ -297,8 +297,10 @@ class TestLocalWorkspaceExecutor:
         """Convert check timeouts into check results."""
 
         def fake_run(
+            _runner: object,
             command: tuple[str, ...],
-            **_kwargs: object,
+            _cwd: Path,
+            _timeout: float,
         ) -> subprocess.CompletedProcess[str]:
             raise subprocess.TimeoutExpired(
                 cmd=command,
@@ -308,8 +310,8 @@ class TestLocalWorkspaceExecutor:
             )
 
         monkeypatch.setattr(
-            "agent_team.infrastructure.workspace.local_workspace_executor."
-            "subprocess.run",
+            "agent_team.infrastructure.workspace.cancellable_command_runner."
+            "CancellableCommandRunner.run",
             fake_run,
         )
         executor = LocalWorkspaceExecutor(
