@@ -1,5 +1,6 @@
 """Ollama runtime settings."""
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -21,6 +22,17 @@ class OllamaSettings:
     model: str = DEFAULT_OLLAMA_MODEL
     max_output_tokens: int = DEFAULT_OLLAMA_MAX_OUTPUT_TOKENS
     thinking_enabled: bool = False
+    provider_response_timeout_seconds: float = 900.0
+
+    def __post_init__(self) -> None:
+        """Reject disabled or unbounded local provider deadlines."""
+        timeout = self.provider_response_timeout_seconds
+        if (
+            isinstance(timeout, bool)
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ValueError("Provider timeout must be positive finite.")
 
     @property
     def service_root(self) -> str:

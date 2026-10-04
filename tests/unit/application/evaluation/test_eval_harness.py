@@ -93,7 +93,10 @@ class _CandidateRunner:
         case: EvalCase,
         candidate_model: str,
         repetition: int,
+        *,
+        context: object | None = None,
     ) -> CandidateRunResult:
+        _ = context
         assert repetition >= 1
         self.calls += 1
         return replace(
@@ -113,7 +116,10 @@ class _SequenceCandidateRunner:
         case: EvalCase,
         candidate_model: str,
         repetition: int,
+        *,
+        context: object | None = None,
     ) -> CandidateRunResult:
+        _ = context
         assert case.id
         assert candidate_model
         assert repetition >= 1
@@ -131,7 +137,10 @@ class _FailingCandidateRunner:
         case: EvalCase,
         candidate_model: str,
         repetition: int,
+        *,
+        context: object | None = None,
     ) -> CandidateRunResult:
+        _ = context
         assert case.id
         assert candidate_model
         assert repetition >= 1
@@ -144,7 +153,10 @@ class _CancellingCandidateRunner:
         case: EvalCase,
         candidate_model: str,
         repetition: int,
+        *,
+        context: object | None = None,
     ) -> CandidateRunResult:
+        _ = context
         assert case.id
         assert candidate_model
         assert repetition >= 1

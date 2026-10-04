@@ -61,9 +61,10 @@ class SQLiteAgentAuditRepository:
                     session_id,
                     feature_id,
                     task_id,
-                    workspace_identity_hash
+                    workspace_identity_hash,
+                    total_turn_limit
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.role.value,
@@ -77,6 +78,7 @@ class SQLiteAgentAuditRepository:
                     run.feature_id,
                     run.task_id,
                     run.workspace_identity_hash,
+                    run.total_turn_limit,
                 ),
             )
             return _select_run(connection, _last_insert_id(cursor))
@@ -174,6 +176,24 @@ class SQLiteAgentAuditRepository:
                     generation_metadata_json,
                     run_id,
                 ),
+            )
+            return _select_run(connection, run_id)
+
+    def record_run_progress(
+        self,
+        run_id: int,
+        segment_count: int,
+        termination_reason: str | None = None,
+    ) -> AgentRunRecord:
+        """Record segment count and a sanitized logical termination reason."""
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                UPDATE agent_runs
+                SET segment_count = ?, termination_reason = ?
+                WHERE id = ?
+                """,
+                (segment_count, termination_reason, run_id),
             )
             return _select_run(connection, run_id)
 
@@ -340,7 +360,10 @@ class SQLiteAgentAuditRepository:
                     feature_id,
                     task_id,
                     workspace_identity_hash,
-                    generation_metadata_json
+                    generation_metadata_json,
+                    total_turn_limit,
+                    segment_count,
+                    termination_reason
                 FROM agent_runs
                 ORDER BY id DESC
                 LIMIT ?
@@ -372,7 +395,10 @@ class SQLiteAgentAuditRepository:
                     feature_id,
                     task_id,
                     workspace_identity_hash,
-                    generation_metadata_json
+                    generation_metadata_json,
+                    total_turn_limit,
+                    segment_count,
+                    termination_reason
                 FROM agent_runs
                 WHERE id = ?
                 """,
@@ -456,7 +482,10 @@ def _select_run(
                 feature_id,
                 task_id,
                 workspace_identity_hash,
-                generation_metadata_json
+                generation_metadata_json,
+                total_turn_limit,
+                segment_count,
+                termination_reason
             FROM agent_runs
             WHERE id = ?
             """,
@@ -548,6 +577,9 @@ def _map_run(row: sqlite3.Row) -> AgentRunRecord:
         generation_metadata=_generation_metadata(
             row["generation_metadata_json"],
         ),
+        total_turn_limit=_optional_int(row["total_turn_limit"]),
+        segment_count=int(row["segment_count"]),
+        termination_reason=_optional_text(row["termination_reason"]),
     )
 
 

@@ -61,6 +61,10 @@ class TestAuditCliIntegration:
         assert "Task ID: 2" in captured.out
         assert "Workspace identity hash: workspace-hash" in captured.out
         assert "Session ID: session-1" in captured.out
+        assert "Segment turns (legacy max_turns): 6" in captured.out
+        assert "Total turn limit: -" in captured.out
+        assert "Segment count: 3" in captured.out
+        assert "Termination reason: completed" in captured.out
         assert "Prompt: Create a feature." in captured.out
         assert "development_workflow.create_feature" in captured.out
         assert 'Arguments: {"title":"Login"}' in captured.out
@@ -100,6 +104,7 @@ def _seed_completed_run(database_path: Path) -> int:
         result_hash="result-hash",
         result_preview='{"id":1}',
     )
+    repository.record_run_progress(run.id, 3, "completed")
     completed = repository.complete_run(
         run_id=run.id,
         output_hash="output-hash",

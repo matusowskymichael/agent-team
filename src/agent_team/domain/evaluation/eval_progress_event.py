@@ -6,6 +6,9 @@ from agent_team.domain.evaluation.eval_phase import EvalPhase
 from agent_team.domain.evaluation.eval_progress_event_kind import (
     EvalProgressEventKind,
 )
+from agent_team.domain.runtime.agent_liveness_snapshot import (
+    AgentLivenessSnapshot,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,3 +31,6 @@ class EvalProgressEvent:
     case_duration_seconds: float | None = None
     infrastructure_retry: int | None = None
     total_infrastructure_retries: int | None = None
+    liveness_snapshot: AgentLivenessSnapshot | None = None
+    case_timeout_seconds: float | None = None
+    case_remaining_seconds: float | None = None

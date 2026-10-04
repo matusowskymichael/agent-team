@@ -3,6 +3,8 @@
 from dataclasses import replace
 from io import StringIO
 
+import pytest
+
 from agent_team.domain.evaluation.eval_phase import EvalPhase
 from agent_team.domain.evaluation.eval_progress_event import (
     EvalProgressEvent,
@@ -38,6 +40,115 @@ class _ManualClock:
 
 class TestTerminalEvalProgressReporter:
     """Terminal progress reporter behavior tests."""
+
+    @pytest.mark.parametrize(
+        ("classification", "expected"),
+        (
+            ("check_failed", "check_failed"),
+            ("timeout", "timeout"),
+            ("/private/source.py:secret", "-"),
+        ),
+    )
+    def test_heartbeat_exposes_only_safe_verification_classifications(
+        self,
+        liveness_heartbeat: EvalProgressEvent,
+        classification: str,
+        expected: str,
+    ) -> None:
+        """Explain verification failures without arbitrary diagnostic text."""
+        snapshot = liveness_heartbeat.liveness_snapshot
+        assert snapshot is not None
+        event = replace(
+            liveness_heartbeat,
+            liveness_snapshot=replace(
+                snapshot,
+                last_verification_outcome="failed",
+                verification_failure_classification=classification,
+            ),
+        )
+        stream = _Stream(interactive=False)
+        reporter = TerminalEvalProgressReporter(
+            stream=stream, interactive=False, auto_refresh=False
+        )
+        reporter.report(event)
+        output = stream.getvalue()
+        assert f"verification failed ({expected})" in output
+        assert "/private" not in output
+
+    def test_heartbeat_metadata_renders_live_advancement_and_deadline(
+        self, liveness_heartbeat: EvalProgressEvent
+    ) -> None:
+        """Expose bounded runtime facts as inference continues waiting."""
+        clock = _ManualClock()
+        stream = _Stream(interactive=True)
+        reporter = TerminalEvalProgressReporter(
+            stream=stream,
+            interactive=True,
+            auto_refresh=False,
+            monotonic=clock.monotonic,
+        )
+        reporter.report(liveness_heartbeat)
+        clock.advance(30)
+        reporter.refresh()
+        output = stream.getvalue()
+        for value in (
+            "fd-dev-002",
+            "segment 2",
+            "task in_progress",
+            "phase checked",
+            "waiting model",
+            "last operation run_check",
+            "check failed",
+            "last advancement 00:04:40 ago",
+            "case deadline 00:45:00",
+            "remaining 00:32:00",
+        ):
+            assert value in output
+
+    def test_heartbeat_metadata_never_prints_private_fields(
+        self, liveness_heartbeat: EvalProgressEvent
+    ) -> None:
+        """Unknown metadata cannot inject paths, arguments or secret output."""
+        snapshot = liveness_heartbeat.liveness_snapshot
+        assert snapshot is not None
+        event = replace(
+            liveness_heartbeat,
+            liveness_snapshot=replace(
+                snapshot,
+                last_tool_name="read_file('/private/source.py')",
+                task_status="secret-token",
+                waiting_phase="private prompt",
+                last_check_outcome="source body",
+                changed_paths=("/private",),
+            ),
+        )
+        stream = _Stream(interactive=False)
+        reporter = TerminalEvalProgressReporter(
+            stream=stream, interactive=False, auto_refresh=False
+        )
+        reporter.report(event)
+        output = stream.getvalue()
+        assert "segment 2" in output
+        for private in (
+            "/private",
+            "secret-token",
+            "private prompt",
+            "source body",
+            "read_file(",
+        ):
+            assert private not in output
+
+    def test_finished_reporter_does_not_resume_refreshing(self) -> None:
+        """Terminal events stop further refreshes of completed candidates."""
+        stream = _Stream(interactive=True)
+        reporter = TerminalEvalProgressReporter(
+            stream=stream, interactive=True, auto_refresh=False
+        )
+        reporter.report(_event(EvalProgressEventKind.PHASE_STARTED))
+        reporter.report(_event(EvalProgressEventKind.RUN_FINISHED))
+        finished = stream.getvalue()
+        reporter.refresh()
+        assert stream.getvalue() == finished
 
     def test_interactive_rendering_refreshes_elapsed_time(self) -> None:
         """Render an updating interactive line without ANSI escape codes."""

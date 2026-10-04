@@ -147,6 +147,8 @@ def build_runtime_instructions(
                 context.authoritative_context,
             ),
         )
+    if task is not None and task.continuation_context is not None:
+        instruction_parts.extend(("", task.continuation_context))
     return "\n".join(instruction_parts)
 
 

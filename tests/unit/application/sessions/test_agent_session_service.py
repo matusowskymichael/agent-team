@@ -68,6 +68,94 @@ class _SessionRepository:
 class TestAgentSessionService:
     """AgentSessionService behavior tests."""
 
+    def test_unscoped_request_has_no_session(self) -> None:
+        """Avoid persisting a session for an unbound advisory request."""
+        repository = _SessionRepository()
+
+        session = AgentSessionService(repository).prepare_session(
+            None,
+            DevelopmentRole.BUSINESS_ANALYST,
+            None,
+        )
+
+        assert session is None
+        assert repository.sessions == {}
+
+    @pytest.mark.parametrize("feature_id", [0, -1])
+    def test_rejects_nonpositive_scope(self, feature_id: int) -> None:
+        """Reject invalid feature scope before session persistence."""
+        repository = _SessionRepository()
+
+        with pytest.raises(AgentSessionBindingError, match="positive"):
+            AgentSessionService(repository).prepare_session(
+                feature_id,
+                DevelopmentRole.BUSINESS_ANALYST,
+                None,
+            )
+
+        assert repository.sessions == {}
+
+    @pytest.mark.parametrize(
+        ("task_id", "workspace_hash"),
+        [(0, "workspace"), (-1, "workspace"), (1, None), (1, " ")],
+    )
+    def test_rejects_invalid_developer_binding_values(
+        self,
+        task_id: int,
+        workspace_hash: str | None,
+    ) -> None:
+        """Require positive task IDs and a meaningful workspace identity."""
+        repository = _SessionRepository()
+
+        with pytest.raises(AgentSessionBindingError):
+            AgentSessionService(repository).prepare_session(
+                1,
+                DevelopmentRole.BACKEND_DEVELOPER,
+                None,
+                task_id=task_id,
+                workspace_identity_hash=workspace_hash,
+            )
+
+        assert repository.sessions == {}
+
+    def test_rejects_overlong_session_identifier(self) -> None:
+        """Bound persisted session identifiers before accessing storage."""
+        repository = _SessionRepository()
+
+        with pytest.raises(InvalidAgentSessionIdError, match="128"):
+            AgentSessionService(repository).prepare_session(
+                1,
+                DevelopmentRole.BUSINESS_ANALYST,
+                "s" * 129,
+            )
+
+        assert repository.sessions == {}
+
+    def test_reuses_same_developer_binding(self) -> None:
+        """Continue a session only with its original task and workspace."""
+        repository = _SessionRepository()
+        service = AgentSessionService(repository)
+        first = service.prepare_session(
+            1,
+            DevelopmentRole.BACKEND_DEVELOPER,
+            "developer-session",
+            task_id=7,
+            workspace_identity_hash="workspace",
+        )
+        resumed = service.prepare_session(
+            1,
+            DevelopmentRole.BACKEND_DEVELOPER,
+            "developer-session",
+            task_id=7,
+            workspace_identity_hash="workspace",
+        )
+
+        assert first is not None
+        assert resumed is not None
+        assert resumed.task_id == first.task_id
+        assert resumed.workspace_identity_hash == first.workspace_identity_hash
+        assert resumed.updated_at > first.updated_at
+
     def test_derives_session_id_from_role_and_feature(self) -> None:
         """Create a deterministic binding when session ID is omitted."""
         repository = _SessionRepository()

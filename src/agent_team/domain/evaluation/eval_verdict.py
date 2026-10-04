@@ -16,3 +16,5 @@ class EvalVerdict(StrEnum):
     JUDGE_FAILED = "judge_failed"
     JUDGE_ERROR = "judge_error"
     AMBIGUOUS = "ambiguous"
+    TIMED_OUT = "timed_out"
+    INTERRUPTED = "interrupted"

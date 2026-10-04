@@ -243,7 +243,7 @@ class _DeveloperWorkflowRuntime:
         }
         assert context is None or context.feature_id == task.feature_id
         assert skill_context is None or isinstance(skill_context, str)
-        assert profile.run_limits.max_turns >= len(self.tool_names) + 1
+        assert profile.run_limits.max_turns is None
         self.received_profile = profile
         for tool_name in self.tool_names:
             invocation = self.audit_repository.start_tool_invocation(
@@ -624,7 +624,8 @@ class TestAgentHarness:
 
         assert result.response == f"{role.value} final report."
         assert runtime.received_profile is not None
-        assert runtime.received_profile.run_limits.max_turns == 10
+        assert runtime.received_profile.run_limits.max_turns is None
+        assert runtime.received_profile.run_limits.segment_turns == 10
         assert audit_repository.runs[1].max_turns == 10
         assert audit_repository.runs[1].status is AgentRunStatus.COMPLETED
         assert len(audit_repository.tool_invocations) == len(tool_names)

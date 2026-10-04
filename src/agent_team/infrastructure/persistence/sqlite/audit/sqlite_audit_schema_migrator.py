@@ -8,10 +8,11 @@ from agent_team.infrastructure.persistence.sqlite.audit import (
     sqlite_audit_migration_error,
 )
 
-CURRENT_AUDIT_SCHEMA_VERSION = 4
+CURRENT_AUDIT_SCHEMA_VERSION = 5
 AUDIT_SCHEMA_SESSION_METADATA_VERSION = 2
 AUDIT_SCHEMA_GENERATION_METADATA_VERSION = 3
 AUDIT_SCHEMA_TASK_METADATA_VERSION = 4
+AUDIT_SCHEMA_RUN_PROGRESS_VERSION = 5
 
 _CREATE_AGENT_RUNS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -32,7 +33,10 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     feature_id INTEGER,
     task_id INTEGER,
     workspace_identity_hash TEXT,
-    generation_metadata_json TEXT
+    generation_metadata_json TEXT,
+    total_turn_limit INTEGER,
+    segment_count INTEGER NOT NULL DEFAULT 0,
+    termination_reason TEXT
 );
 """
 
@@ -68,6 +72,12 @@ _AGENT_RUN_GENERATION_METADATA_COLUMNS = (
 _AGENT_RUN_TASK_METADATA_COLUMNS = (
     ("task_id", "INTEGER"),
     ("workspace_identity_hash", "TEXT"),
+)
+
+_AGENT_RUN_PROGRESS_COLUMNS = (
+    ("total_turn_limit", "INTEGER"),
+    ("segment_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("termination_reason", "TEXT"),
 )
 
 _INDEXES_SQL = (
@@ -167,6 +177,10 @@ class SQLiteAuditSchemaMigrator:
             self._migrate_to_version_4(connection)
         else:
             self._ensure_task_metadata_columns(connection)
+        if version < AUDIT_SCHEMA_RUN_PROGRESS_VERSION:
+            self._migrate_to_version_5(connection)
+        else:
+            self._ensure_progress_metadata_columns(connection)
 
     def _migrate_to_version_1(self, connection: sqlite3.Connection) -> None:
         """Create the original audit tables."""
@@ -183,6 +197,10 @@ class SQLiteAuditSchemaMigrator:
     def _migrate_to_version_4(self, connection: sqlite3.Connection) -> None:
         """Add task-scoped run metadata columns."""
         self._ensure_task_metadata_columns(connection)
+
+    def _migrate_to_version_5(self, connection: sqlite3.Connection) -> None:
+        """Add logical execution progress without rewriting historical rows."""
+        self._ensure_progress_metadata_columns(connection)
 
     def _ensure_base_tables(self, connection: sqlite3.Connection) -> None:
         """Create the base audit tables if they do not already exist."""
@@ -208,6 +226,14 @@ class SQLiteAuditSchemaMigrator:
     ) -> None:
         """Add nullable columns for task-scoped run metadata."""
         for column_name, column_type in _AGENT_RUN_TASK_METADATA_COLUMNS:
+            _ensure_agent_run_column(connection, column_name, column_type)
+
+    def _ensure_progress_metadata_columns(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add optional limits and sanitized logical execution metadata."""
+        for column_name, column_type in _AGENT_RUN_PROGRESS_COLUMNS:
             _ensure_agent_run_column(connection, column_name, column_type)
 
     def _create_indexes(self, connection: sqlite3.Connection) -> None:

@@ -1,15 +1,20 @@
 """Local candidate agent runner for evaluations."""
 
+import asyncio
 import json
 import os
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import cast
 
-from agent_team.application.audit.audit_sanitizer import sanitize_error
+from agent_team.application.audit.audit_sanitizer import (
+    sanitize_diagnostic_text,
+    sanitize_error,
+    sanitize_text,
+)
 from agent_team.application.runtime.agent_harness import AgentHarness
 from agent_team.application.runtime.capability_authorizer import (
     CapabilityAuthorizer,
@@ -30,10 +35,15 @@ from agent_team.application.workflow.task_verification_service import (
 from agent_team.application.workspace.workspace_service import (
     WorkspaceService,
 )
+from agent_team.domain.audit.tool_invocation_record import ToolInvocationRecord
+from agent_team.domain.audit.tool_invocation_status import ToolInvocationStatus
 from agent_team.domain.evaluation.candidate_run_result import (
     CandidateRunResult,
 )
 from agent_team.domain.evaluation.database_effect import DatabaseEffect
+from agent_team.domain.evaluation.eval_candidate_execution_context import (
+    EvalCandidateExecutionContext,
+)
 from agent_team.domain.evaluation.eval_case import EvalCase
 from agent_team.domain.evaluation.eval_error_stage import EvalErrorStage
 from agent_team.domain.evaluation.eval_feature_fixture import (
@@ -49,11 +59,26 @@ from agent_team.domain.evaluation.observed_skill_call import (
     ObservedSkillCall,
 )
 from agent_team.domain.evaluation.observed_tool_call import ObservedToolCall
+from agent_team.domain.runtime.agent_cleanup_timeout_error import (
+    AgentCleanupTimeoutError,
+)
+from agent_team.domain.runtime.agent_lifecycle_phase import AgentLifecyclePhase
+from agent_team.domain.runtime.agent_liveness_snapshot import (
+    AgentLivenessSnapshot,
+)
+from agent_team.domain.runtime.agent_provider_timeout_error import (
+    AgentProviderTimeoutError,
+)
+from agent_team.domain.runtime.agent_segment_timeout_error import (
+    AgentSegmentTimeoutError,
+)
 from agent_team.domain.runtime.agent_task import AgentTask
 from agent_team.domain.runtime.development_role import DevelopmentRole
+from agent_team.domain.runtime.workflow_tool_name import WorkflowToolName
 from agent_team.domain.sessions.agent_session_binding_error import (
     AgentSessionBindingError,
 )
+from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 from agent_team.infrastructure.configuration.workflow_database_path import (
     AGENT_TEAM_DB_PATH_ENV,
 )
@@ -136,8 +161,11 @@ class LocalCandidateAgentRunner:
         case: EvalCase,
         candidate_model: str,
         repetition: int,
+        *,
+        context: EvalCandidateExecutionContext | None = None,
     ) -> CandidateRunResult:
         """Run one evaluation case against local Ollama and MCP."""
+        execution_context = context or EvalCandidateExecutionContext()
         with TemporaryDirectory() as directory:
             temp_root = Path(directory)
             database_path = temp_root / "workflow.db"
@@ -156,6 +184,9 @@ class LocalCandidateAgentRunner:
                     or self.base_settings.max_output_tokens
                 ),
                 thinking_enabled=self.base_settings.thinking_enabled,
+                provider_response_timeout_seconds=(
+                    execution_context.watchdogs.provider_response_timeout_seconds
+                ),
             )
             orchestrator = _orchestrator(
                 database_path=database_path,
@@ -173,36 +204,269 @@ class LocalCandidateAgentRunner:
                         session_id=_session_id(case, repetition),
                         task_id=case.task_scope_id,
                         workspace_root=_workspace_root(case, workspace_root),
+                        watchdogs=execution_context.watchdogs,
+                        liveness_observer=execution_context.liveness_observer,
                     ),
                 )
                 response = result.response
                 status = "completed"
                 error_type = None
                 error_message = None
+            except (asyncio.CancelledError, KeyboardInterrupt) as error:
+                candidate = _capture_candidate(
+                    workflow_repository,
+                    baseline,
+                    audit_repository,
+                    case,
+                    candidate_model,
+                    effective_settings.max_output_tokens,
+                    status="interrupted",
+                    error_type=type(error).__name__,
+                    error_message="Candidate execution was cancelled.",
+                    error_stage=EvalErrorStage.CANDIDATE_EXECUTION.value,
+                    termination_reason="cancelled",
+                )
+                if execution_context.checkpoint is not None:
+                    execution_context.checkpoint(candidate)
+                raise
             except Exception as error:
                 response = ""
                 error_type, error_message = sanitize_error(error)
-                status = _status(error)
+                status = (
+                    "timed_out"
+                    if isinstance(
+                        error,
+                        AgentProviderTimeoutError
+                        | AgentSegmentTimeoutError
+                        | AgentCleanupTimeoutError,
+                    )
+                    else _status(error)
+                )
                 error_stage = _error_stage(error)
+                termination_reason = (
+                    "provider_timeout"
+                    if isinstance(error, AgentProviderTimeoutError)
+                    else "segment_timeout"
+                    if isinstance(error, AgentSegmentTimeoutError)
+                    else "cleanup_timeout"
+                    if isinstance(error, AgentCleanupTimeoutError)
+                    else None
+                )
             else:
                 error_stage = None
+                termination_reason = None
 
-            effects = _database_effects(workflow_repository, baseline)
-            tool_calls = _tool_calls(audit_repository, effects, case)
-            skill_calls = _skill_calls(audit_repository)
-            return CandidateRunResult(
-                role=case.active_role,
-                model=candidate_model,
-                final_response=response,
-                tool_calls=tool_calls,
-                database_effects=effects,
-                skill_calls=skill_calls,
+            candidate = _capture_candidate(
+                workflow_repository,
+                baseline,
+                audit_repository,
+                case,
+                candidate_model,
+                effective_settings.max_output_tokens,
                 status=status,
+                response=response,
                 error_type=error_type,
                 error_message=error_message,
                 error_stage=error_stage,
-                max_output_tokens=effective_settings.max_output_tokens,
+                termination_reason=termination_reason,
             )
+            if execution_context.checkpoint is not None:
+                execution_context.checkpoint(candidate)
+            return candidate
+
+
+def _capture_candidate(  # noqa: PLR0913, PLR0917
+    repository: SQLiteWorkflowRepository,
+    baseline: WorkflowSnapshot,
+    audit: SQLiteAgentAuditRepository,
+    case: EvalCase,
+    model: str,
+    max_output_tokens: int,
+    *,
+    status: str,
+    response: str = "",
+    error_type: str | None = None,
+    error_message: str | None = None,
+    error_stage: str | None = None,
+    termination_reason: str | None = None,
+) -> CandidateRunResult:
+    """Read durable workflow and audit effects before temporary cleanup."""
+    effects = _database_effects(repository, baseline)
+    calls = _tool_calls(audit, effects, case)
+    if status in {
+        "interrupted",
+        "timed_out",
+        "failed",
+        "infrastructure_error",
+    }:
+        calls = tuple(
+            replace(
+                call,
+                arguments=_safe_partial_mapping(
+                    call.arguments,
+                ),
+            )
+            for call in calls
+        )
+        effects = tuple(
+            replace(
+                effect,
+                field_values=_safe_partial_mapping(
+                    effect.field_values,
+                ),
+            )
+            for effect in effects
+        )
+    runs = audit.list_runs(limit=1)
+    reason = termination_reason
+    if reason is None and runs:
+        reason = runs[0].termination_reason
+    return CandidateRunResult(
+        role=case.active_role,
+        model=model,
+        final_response=response,
+        tool_calls=calls,
+        database_effects=effects,
+        skill_calls=_skill_calls(audit),
+        status=status,
+        error_type=error_type,
+        error_message=(
+            None
+            if error_message is None
+            else sanitize_diagnostic_text(error_message)
+        ),
+        error_stage=error_stage,
+        max_output_tokens=max_output_tokens,
+        liveness_snapshot=_candidate_liveness_snapshot(
+            repository, audit, case
+        ),
+        termination_reason=reason,
+    )
+
+
+def _candidate_liveness_snapshot(
+    repository: SQLiteWorkflowRepository,
+    audit: SQLiteAgentAuditRepository,
+    case: EvalCase,
+) -> AgentLivenessSnapshot:
+    """Reconcile bounded durable metadata without source or command output."""
+    task = (
+        None
+        if case.task_scope_id is None
+        else repository.get_task(case.task_scope_id)
+    )
+    handoff = None if task is None else repository.latest_task_handoff(task.id)
+    verification = (
+        None if task is None else repository.latest_task_verification(task.id)
+    )
+    runs = audit.list_runs(limit=1)
+    run = None if not runs else runs[0]
+    invocations = [] if run is None else audit.list_tool_invocations(run.id)
+    completed = [
+        item
+        for item in invocations
+        if item.status is ToolInvocationStatus.COMPLETED
+    ]
+    safe_tools = {tool.value for tool in WorkflowToolName} | {
+        tool.value for tool in WorkspaceToolName
+    }
+    safe_tools.update({"load_skill", "load_skill_resource", "list_skills"})
+    paths, phase, check_outcome = _audit_activity_state(completed)
+    if handoff is not None:
+        phase = AgentLifecyclePhase.SUBMITTED
+    if verification is not None:
+        phase = AgentLifecyclePhase.VERIFIED
+    if task is not None and task.status.value in {"completed", "blocked"}:
+        phase = AgentLifecyclePhase(task.status.value)
+    return AgentLivenessSnapshot(
+        segment_count=0 if run is None else run.segment_count,
+        task_status=None if task is None else task.status.value,
+        lifecycle_phase=phase,
+        last_tool_name=next(
+            (
+                item.tool_name
+                for item in reversed(completed)
+                if item.tool_name in safe_tools
+            ),
+            None,
+        ),
+        changed_paths=tuple(sorted(set(paths))[:24]),
+        last_check_outcome=check_outcome,
+        last_verification_outcome=(
+            None if verification is None else verification.outcome.value
+        ),
+        verification_failure_classification=(
+            None
+            if verification is None
+            else verification.failure_classification.value
+        ),
+        waiting_phase="cleanup",
+    )
+
+
+def _audit_activity_state(
+    completed: list[ToolInvocationRecord],
+) -> tuple[list[str], AgentLifecyclePhase, str | None]:
+    paths: list[str] = []
+    phase = AgentLifecyclePhase.STARTED
+    check_outcome = None
+    for invocation in completed:
+        if invocation.tool_name in {"get_feature_overview", "list_tasks"}:
+            phase = AgentLifecyclePhase.INSPECTED
+        elif invocation.tool_name == "update_task_status":
+            phase = AgentLifecyclePhase.ACTIVATED
+        elif invocation.tool_name == "apply_patch":
+            result = _json_object(invocation.result_preview or "{}")
+            path = result.get("path")
+            if result.get("applied") is True and isinstance(path, str):
+                relative = PurePosixPath(path.replace("\\", "/"))
+                if (
+                    not relative.is_absolute()
+                    and ".." not in relative.parts
+                    and ":" not in path
+                ):
+                    paths.append(sanitize_text(path))
+                phase = AgentLifecyclePhase.IMPLEMENTED
+        elif invocation.tool_name == "run_check":
+            phase = AgentLifecyclePhase.CHECKED
+            result = _json_object(invocation.result_preview or "{}")
+            if type(result.get("exit_code")) is not int or not isinstance(
+                result.get("timed_out"), bool
+            ):
+                check_outcome = None
+                continue
+            check_outcome = (
+                "timed_out"
+                if result.get("timed_out") is True
+                else "passed"
+                if result.get("exit_code") == 0
+                else "failed"
+            )
+    return paths, phase, check_outcome
+
+
+def _safe_partial_mapping(values: dict[str, object]) -> dict[str, object]:
+    """Bound existing diagnostic evidence and omit forbidden text values."""
+    sanitized: dict[str, object] = {}
+    for key, value in tuple(values.items())[:24]:
+        if key in {"content", "old_text", "new_text", "prompt"}:
+            continue
+        sanitized[key] = _safe_partial_value(value)
+    return sanitized
+
+
+def _safe_partial_value(value: object) -> object:
+    """Recursively sanitize bounded partial evidence, including list maps."""
+    if isinstance(value, dict):
+        return _safe_partial_mapping(cast("dict[str, object]", value))
+    if isinstance(value, list | tuple):
+        return [
+            _safe_partial_value(item)
+            for item in cast("list[object] | tuple[object, ...]", value)[:24]
+        ]
+    if isinstance(value, str):
+        return sanitize_diagnostic_text(value)
+    return value
 
 
 def _orchestrator(
@@ -261,6 +525,7 @@ def _orchestrator(
         agent_executor=AgentHarness(
             runtime=runtime,
             audit_repository=audit_repository,
+            workflow_repository=workflow_repository,
             session_service=AgentSessionService(
                 repository=session_repository,
                 workflow_repository=workflow_repository,

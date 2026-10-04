@@ -8,6 +8,7 @@ import pytest
 from agent_team.application.audit.audit_sanitizer import (
     MAX_AUDIT_EXCERPT_LENGTH,
     omit_hidden_reasoning,
+    sanitize_diagnostic_text,
     sanitize_text,
     sanitize_tool_arguments,
     sanitize_tool_result,
@@ -23,6 +24,26 @@ class TestAuditSanitizer:
 
         assert len(excerpt) == MAX_AUDIT_EXCERPT_LENGTH
         assert excerpt.endswith("...")
+
+    @pytest.mark.parametrize(
+        "path", ["/private-workspace/file.py", r"C:\private\file.py"]
+    )
+    def test_diagnostics_omit_private_paths_and_are_bounded(
+        self, path: str
+    ) -> None:
+        """Hide reasoning, credentials and absolute paths in diagnostics."""
+        message = (
+            f"Failed at {path} api_key=private-key "
+            "<think>private-reasoning</think> " + "long diagnostic " * 30
+        )
+
+        excerpt = sanitize_diagnostic_text(message)
+
+        assert len(excerpt) <= MAX_AUDIT_EXCERPT_LENGTH
+        assert path not in excerpt
+        assert "private-key" not in excerpt
+        assert "private-reasoning" not in excerpt
+        assert "[absolute path omitted]" in excerpt
 
     def test_secret_like_keys_are_redacted(self) -> None:
         """Redact values for sensitive key names."""

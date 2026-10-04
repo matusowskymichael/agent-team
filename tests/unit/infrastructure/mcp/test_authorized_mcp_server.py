@@ -1,9 +1,10 @@
 """Tests for authorized MCP server enforcement."""
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 
 from agent_team.application.audit.audit_sanitizer import sanitize_tool_result
 from agent_team.application.runtime.agent_profile_catalog import (
@@ -45,6 +46,24 @@ from tests.unit.fakes.workflow.fake_workflow_repository import (
 
 class TestAuthorizedMCPServer:
     """Authorized MCP server behavior tests."""
+
+    @pytest.mark.parametrize("supported", (True, False))
+    def test_forced_cleanup_delegates_only_to_owned_process_boundary(
+        self, monkeypatch: pytest.MonkeyPatch, supported: bool
+    ) -> None:
+        """Optional cleanup preserves unsupported in-memory MCP adapters."""
+        server = _authorized_server(DevelopmentRole.BUSINESS_ANALYST)
+        cleaned: list[bool] = []
+
+        def force_cleanup() -> None:
+            cleaned.append(True)
+
+        if supported:
+            monkeypatch.setattr(
+                server.delegate, "force_cleanup", force_cleanup, raising=False
+            )
+        server.force_cleanup()
+        assert cleaned == ([True] if supported else [])
 
     @pytest.mark.parametrize(
         ("role", "expected_tool_names"),
@@ -1006,6 +1025,28 @@ class TestAuthorizedMCPServer:
         assert len(invocations) == 1
         assert invocations[0].status is ToolInvocationStatus.FAILED
         assert invocations[0].error_type == "RuntimeError"
+
+    def test_error_results_are_failed_operations(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An MCP error payload must never appear as successful progress."""
+        server = _authorized_server(DevelopmentRole.DELIVERY_MANAGER)
+        result = CallToolResult(
+            content=[TextContent(type="text", text="secret=private-value")],
+            is_error=True,
+        )
+        call = AsyncMock(return_value=result)
+        monkeypatch.setattr(server.delegate, "call_tool", call)
+
+        returned = asyncio.run(server.call_tool("list_features", {}))
+
+        invocation = next(iter(_fake_audit(server).tool_invocations.values()))
+        assert returned is result
+        call.assert_awaited_once()
+        assert invocation.status is ToolInvocationStatus.FAILED
+        assert invocation.error_type == "MCPToolError"
+        assert "private-value" not in str(invocation)
 
     def test_audit_recording_failure_prevents_mcp_execution(self) -> None:
         """Do not invoke MCP when allowed calls cannot be audited first."""

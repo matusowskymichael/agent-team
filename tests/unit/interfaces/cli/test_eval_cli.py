@@ -14,19 +14,25 @@ from agent_team.domain.evaluation.eval_attempt_result import (
     EvalAttemptResult,
 )
 from agent_team.domain.evaluation.eval_case_result import EvalCaseResult
+from agent_team.domain.evaluation.eval_progress_event import EvalProgressEvent
 from agent_team.domain.evaluation.eval_run_config import EvalRunConfig
 from agent_team.domain.evaluation.eval_run_result import EvalRunResult
+from agent_team.domain.evaluation.eval_run_status import EvalRunStatus
 from agent_team.domain.evaluation.eval_suite import EvalSuite
 from agent_team.domain.evaluation.eval_verdict import EvalVerdict
 from agent_team.domain.evaluation.judge_grade import JudgeGrade
 from agent_team.domain.evaluation.observed_skill_call import ObservedSkillCall
 from agent_team.domain.evaluation.rubric import Rubric
 from agent_team.domain.runtime.development_role import DevelopmentRole
+from agent_team.infrastructure.ollama.ollama_settings import OllamaSettings
 from agent_team.interfaces.cli import eval_cli
 
 
-class _Repository:
+class EvalCliRepository:
+    """Reuse an in-memory result store across isolated CLI paths."""
+
     def __init__(self) -> None:
+        """Seed two historical runs for show and comparison commands."""
         self.results = {
             "baseline": _result("baseline", EvalVerdict.FAIL),
             "candidate": _result("candidate", EvalVerdict.NOT_RUN),
@@ -34,25 +40,36 @@ class _Repository:
         self.saved: EvalRunResult | None = None
 
     def save(self, result: EvalRunResult) -> None:
+        """Keep the latest saved result for command assertions."""
         self.saved = result
         self.results[result.id] = result
 
     def get(self, result_id: str) -> EvalRunResult | None:
+        """Return a seeded or saved result."""
         return self.results.get(result_id)
 
     def list_ids(self) -> list[str]:
+        """List deterministic fixture identities."""
         return sorted(self.results)
 
 
-class _EvalRunner:
+class EvalCliRunner:
+    """Record CLI composition and return a deterministic candidate result."""
+
     received_case_ids: tuple[str, ...] = ()
     received_progress_reporter: object | None = None
     received_infrastructure_retries: int | None = None
     received_rubric_id: str | None = None
+    received_config: EvalRunConfig | None = None
+    received_result_repository: object | None = None
 
     def __init__(self, **_kwargs: object) -> None:
+        """Capture injected reporting and checkpoint boundaries."""
         self.__class__.received_progress_reporter = _kwargs.get(
             "progress_reporter",
+        )
+        self.__class__.received_result_repository = _kwargs.get(
+            "result_repository",
         )
 
     async def run_suite(
@@ -60,9 +77,11 @@ class _EvalRunner:
         suite: EvalSuite,
         **_kwargs: object,
     ) -> EvalRunResult:
+        """Record selection and operator policy without executing models."""
         config = _kwargs.get("config")
         rubric = _kwargs.get("rubric")
         assert isinstance(config, EvalRunConfig)
+        self.__class__.received_config = config
         assert isinstance(rubric, Rubric)
         self.__class__.received_infrastructure_retries = (
             config.infrastructure_retries
@@ -89,6 +108,287 @@ class _InfrastructureEvalRunner:
 
 class TestEvalCli:
     """Evaluation CLI behavior tests."""
+
+    def test_unrecoverable_run_error_is_bounded_and_path_safe(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Protect diagnostics when execution fails before a run summary."""
+
+        async def run(_arguments: object) -> EvalRunResult:
+            raise RuntimeError(
+                "Cannot read /private/workspace/state.json token=sensitive "
+                + "output " * 200
+            )
+
+        monkeypatch.setattr(eval_cli, "_run", run)
+        assert (
+            eval_cli.main(
+                [
+                    "run",
+                    "--suite",
+                    "business_analyst_development",
+                    "--no-judge",
+                ]
+            )
+            == 2
+        )
+        error = capsys.readouterr().err
+        assert "/private" not in error
+        assert "sensitive" not in error
+        assert len(error.strip()) <= 160
+
+    def test_interrupted_diagnostics_are_bounded_and_path_safe(
+        self,
+        fake_eval_cli: EvalCliRepository,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Display partial errors without secrets or raw filesystem paths."""
+        saved = _result("unsafe-diagnostic-run", EvalVerdict.NOT_JUDGED)
+        private_message = (
+            "Operation interrupted at /private/workspace/source.py "
+            "token=sensitive <think>hidden analysis</think> " + "output " * 200
+        )
+        candidate = replace(
+            saved.case_results[0].candidate_result,
+            final_response="",
+            termination_reason=private_message,
+            error_type="CancelledError",
+            error_message=private_message,
+        )
+        fake_eval_cli.results[saved.id] = replace(
+            saved,
+            status=EvalRunStatus.INTERRUPTED,
+            case_results=(),
+            active_case_id="ba-dev-001",
+            active_repetition=1,
+            active_attempt=1,
+            active_candidate=candidate,
+            termination_type="CancelledError",
+            termination_message=private_message,
+        )
+        assert eval_cli.main(["show", saved.id, "--verbose"]) == 0
+        output = capsys.readouterr().out
+        for forbidden in (
+            "/private",
+            "sensitive",
+            "hidden analysis",
+            "output " * 30,
+        ):
+            assert forbidden not in output
+        for line in output.splitlines():
+            if "message:" in line or "Termination:" in line:
+                assert len(line.split(":", 1)[1].strip()) <= 160
+
+    def test_eval_watchdog_overrides_propagate_to_candidate_provider(
+        self,
+        fake_eval_cli: EvalCliRepository,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Configure provider and harness timeouts from one operator policy."""
+        received_settings: list[OllamaSettings] = []
+
+        def candidate_runner(settings: OllamaSettings) -> object:
+            received_settings.append(settings)
+            return object()
+
+        monkeypatch.setattr(
+            eval_cli, "LocalCandidateAgentRunner", candidate_runner
+        )
+        assert fake_eval_cli.saved is None
+        assert (
+            eval_cli.main(
+                [
+                    "run",
+                    "--suite",
+                    "business_analyst_development",
+                    "--no-judge",
+                    "--provider-timeout-seconds",
+                    "1200",
+                    "--segment-timeout-seconds",
+                    "2400",
+                    "--advancement-timeout-seconds",
+                    "3000",
+                    "--stall-segments",
+                    "6",
+                    "--equivalent-failure-threshold",
+                    "5",
+                    "--cleanup-grace-seconds",
+                    "8",
+                ]
+            )
+            == 0
+        )
+        config = EvalCliRunner.received_config
+        assert config is not None
+        watchdogs = config.runtime_watchdogs
+        assert watchdogs.provider_response_timeout_seconds == 1200
+        assert watchdogs.segment_timeout_seconds == 2400
+        assert watchdogs.no_advancement_timeout_seconds == 3000
+        assert watchdogs.stagnant_segment_threshold == 6
+        assert watchdogs.equivalent_failure_threshold == 5
+        assert watchdogs.cleanup_grace_seconds == 8
+        assert received_settings[0].provider_response_timeout_seconds == 1200
+        assert "provider=1200s" in capsys.readouterr().out
+
+    def test_ctrl_c_returns_130_without_traceback(
+        self,
+        fake_eval_cli: EvalCliRepository,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Expose explicit cancellation separately from timeout or failure."""
+        assert fake_eval_cli.saved is None
+
+        async def run(_arguments: object) -> EvalRunResult:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(eval_cli, "_run", run)
+        assert (
+            eval_cli.main(
+                [
+                    "run",
+                    "--suite",
+                    "business_analyst_development",
+                    "--no-judge",
+                ]
+            )
+            == 130
+        )
+        assert "Traceback" not in capsys.readouterr().err
+
+    def test_interrupted_run_exposes_active_attempt_diagnostics(
+        self,
+        fake_eval_cli: EvalCliRepository,
+        capsys: pytest.CaptureFixture[str],
+        liveness_heartbeat: EvalProgressEvent,
+    ) -> None:
+        """Saved partial runs remain useful even before a case completes."""
+        saved = _result("interrupted-run", EvalVerdict.NOT_JUDGED)
+        candidate = replace(
+            saved.case_results[0].candidate_result,
+            status="interrupted",
+            final_response="",
+            termination_reason="cancelled",
+            liveness_snapshot=liveness_heartbeat.liveness_snapshot,
+        )
+        fake_eval_cli.results[saved.id] = replace(
+            saved,
+            status=EvalRunStatus.INTERRUPTED,
+            case_results=(),
+            active_case_id="ba-dev-001",
+            active_repetition=1,
+            active_attempt=1,
+            active_candidate=candidate,
+            termination_type="CancelledError",
+            termination_message="Evaluation interrupted.",
+        )
+        assert eval_cli.main(["show", saved.id, "--verbose"]) == 0
+        output = capsys.readouterr().out
+        for value in (
+            "Run status: interrupted",
+            "Active case: ba-dev-001",
+            "Repetition: 1",
+            "Attempt: 1",
+            "CancelledError",
+            "segment 2",
+            "phase checked",
+            "last operation run_check",
+            "Termination: cancelled",
+        ):
+            assert value in output
+
+    def test_timeout_is_distinct_from_quality_or_connection_failure(
+        self,
+        fake_eval_cli: EvalCliRepository,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Never count a timed-out attempt as a deterministic pass."""
+        result = _result("timed-out-run", EvalVerdict.TIMED_OUT)
+        result = replace(result, status=EvalRunStatus.TIMED_OUT)
+
+        async def run(_arguments: object) -> EvalRunResult:
+            return result
+
+        monkeypatch.setattr(eval_cli, "_run", run)
+        assert (
+            eval_cli.main(
+                [
+                    "run",
+                    "--suite",
+                    "business_analyst_development",
+                    "--no-judge",
+                ]
+            )
+            == 2
+        )
+        fake_eval_cli.results[result.id] = result
+        assert eval_cli.main(["show", result.id]) == 0
+        output = capsys.readouterr().out
+        assert "Run status: timed_out" in output
+        assert "  timed_out: 1" in output
+        assert "  passed: 0" in output
+        assert "Final status: timed_out" in output
+
+    @pytest.mark.parametrize("timeout", (None, "5400.5"))
+    def test_case_watchdog_defaults_and_overrides_reach_runner(
+        self,
+        fake_eval_cli: EvalCliRepository,
+        capsys: pytest.CaptureFixture[str],
+        timeout: str | None,
+    ) -> None:
+        """Pass a finite deadline and checkpoint repository inward."""
+        arguments = [
+            "run",
+            "--suite",
+            "business_analyst_development",
+            "--no-judge",
+        ]
+        if timeout is not None:
+            arguments.extend(["--case-timeout-seconds", timeout])
+        assert eval_cli.main(arguments) == 0
+        config = EvalCliRunner.received_config
+        assert config is not None
+        assert config.case_timeout_seconds == (
+            2700.0 if timeout is None else float(timeout)
+        )
+        assert EvalCliRunner.received_result_repository is fake_eval_cli
+        output = capsys.readouterr().out
+        assert "Watchdogs:" in output
+        assert f"case={config.case_timeout_seconds:g}s" in output
+        for value in (
+            "provider=900s",
+            "segment=1800s",
+            "advancement=1800s",
+            "stagnant_segments=4",
+            "equivalent_failures=3",
+            "cleanup=10s",
+        ):
+            assert value in output
+
+    @pytest.mark.parametrize("value", ("0", "-1", "nan", "inf", "many"))
+    def test_case_watchdog_rejects_nonpositive_or_nonfinite_values(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        value: str,
+    ) -> None:
+        """Reject unlimited deadline sentinels before inference can start."""
+        with pytest.raises(SystemExit) as error:
+            eval_cli.main(
+                [
+                    "run",
+                    "--suite",
+                    "business_analyst_development",
+                    "--case-timeout-seconds",
+                    value,
+                    "--no-judge",
+                ]
+            )
+        assert error.value.code == 2
+        assert "positive finite" in capsys.readouterr().err
 
     def test_list_suites_prints_golden_datasets(
         self,
@@ -137,7 +437,7 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Run deterministic-only eval CLI path without contacting Ollama."""
-        repository = _Repository()
+        repository = EvalCliRepository()
 
         def ensure_model_ready(_settings: object) -> None:
             return None
@@ -147,7 +447,7 @@ class TestEvalCli:
             "ensure_ollama_model_ready",
             ensure_model_ready,
         )
-        monkeypatch.setattr(eval_cli, "EvalRunner", _EvalRunner)
+        monkeypatch.setattr(eval_cli, "EvalRunner", EvalCliRunner)
         monkeypatch.setattr(
             eval_cli,
             "JsonEvalResultRepository",
@@ -179,7 +479,7 @@ class TestEvalCli:
         assert "  failures: 0" in captured.out
         assert "Overall fully evaluated:" in captured.out
         assert "  passed: 0" in captured.out
-        assert _EvalRunner.received_infrastructure_retries == 1
+        assert EvalCliRunner.received_infrastructure_retries == 1
 
     def test_run_software_architect_suite_uses_architect_rubric(
         self,
@@ -187,18 +487,18 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Select the architect rubric for architect datasets."""
-        repository = _Repository()
+        repository = EvalCliRepository()
 
         def ensure_model_ready(_settings: object) -> None:
             return None
 
-        _EvalRunner.received_rubric_id = None
+        EvalCliRunner.received_rubric_id = None
         monkeypatch.setattr(
             eval_cli,
             "ensure_ollama_model_ready",
             ensure_model_ready,
         )
-        monkeypatch.setattr(eval_cli, "EvalRunner", _EvalRunner)
+        monkeypatch.setattr(eval_cli, "EvalRunner", EvalCliRunner)
         monkeypatch.setattr(
             eval_cli,
             "JsonEvalResultRepository",
@@ -219,8 +519,10 @@ class TestEvalCli:
         captured = capsys.readouterr()
 
         assert exit_code == 0
-        assert _EvalRunner.received_rubric_id == "software_architect_workflow"
-        assert len(_EvalRunner.received_case_ids) == 24
+        assert (
+            EvalCliRunner.received_rubric_id == "software_architect_workflow"
+        )
+        assert len(EvalCliRunner.received_case_ids) == 24
         assert captured.err == ""
 
     def test_run_backend_developer_suite_uses_backend_rubric(
@@ -229,18 +531,18 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Select the backend rubric for backend developer datasets."""
-        repository = _Repository()
+        repository = EvalCliRepository()
 
         def ensure_model_ready(_settings: object) -> None:
             return None
 
-        _EvalRunner.received_rubric_id = None
+        EvalCliRunner.received_rubric_id = None
         monkeypatch.setattr(
             eval_cli,
             "ensure_ollama_model_ready",
             ensure_model_ready,
         )
-        monkeypatch.setattr(eval_cli, "EvalRunner", _EvalRunner)
+        monkeypatch.setattr(eval_cli, "EvalRunner", EvalCliRunner)
         monkeypatch.setattr(
             eval_cli,
             "JsonEvalResultRepository",
@@ -261,8 +563,8 @@ class TestEvalCli:
         captured = capsys.readouterr()
 
         assert exit_code == 0
-        assert _EvalRunner.received_rubric_id == "backend_developer_workflow"
-        assert len(_EvalRunner.received_case_ids) == 10
+        assert EvalCliRunner.received_rubric_id == "backend_developer_workflow"
+        assert len(EvalCliRunner.received_case_ids) == 10
         assert captured.err == ""
 
     def test_run_frontend_developer_suite_uses_frontend_rubric(
@@ -271,18 +573,18 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Select the frontend rubric for frontend developer datasets."""
-        repository = _Repository()
+        repository = EvalCliRepository()
 
         def ensure_model_ready(_settings: object) -> None:
             return None
 
-        _EvalRunner.received_rubric_id = None
+        EvalCliRunner.received_rubric_id = None
         monkeypatch.setattr(
             eval_cli,
             "ensure_ollama_model_ready",
             ensure_model_ready,
         )
-        monkeypatch.setattr(eval_cli, "EvalRunner", _EvalRunner)
+        monkeypatch.setattr(eval_cli, "EvalRunner", EvalCliRunner)
         monkeypatch.setattr(
             eval_cli,
             "JsonEvalResultRepository",
@@ -303,8 +605,10 @@ class TestEvalCli:
         captured = capsys.readouterr()
 
         assert exit_code == 0
-        assert _EvalRunner.received_rubric_id == "frontend_developer_workflow"
-        assert len(_EvalRunner.received_case_ids) == 10
+        assert (
+            EvalCliRunner.received_rubric_id == "frontend_developer_workflow"
+        )
+        assert len(EvalCliRunner.received_case_ids) == 10
         assert captured.err == ""
 
     def test_run_returns_system_error_for_infrastructure_failure(
@@ -313,7 +617,7 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Do not report exhausted infrastructure failures as quality fails."""
-        repository = _Repository()
+        repository = EvalCliRepository()
 
         def ensure_model_ready(_settings: object) -> None:
             return None
@@ -355,18 +659,18 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Run only the selected case without changing dataset hashes."""
-        repository = _Repository()
+        repository = EvalCliRepository()
 
         def ensure_model_ready(_settings: object) -> None:
             return None
 
-        _EvalRunner.received_case_ids = ()
+        EvalCliRunner.received_case_ids = ()
         monkeypatch.setattr(
             eval_cli,
             "ensure_ollama_model_ready",
             ensure_model_ready,
         )
-        monkeypatch.setattr(eval_cli, "EvalRunner", _EvalRunner)
+        monkeypatch.setattr(eval_cli, "EvalRunner", EvalCliRunner)
         monkeypatch.setattr(
             eval_cli,
             "JsonEvalResultRepository",
@@ -389,7 +693,7 @@ class TestEvalCli:
         captured = capsys.readouterr()
 
         assert exit_code == 0
-        assert _EvalRunner.received_case_ids == ("ba-dev-003",)
+        assert EvalCliRunner.received_case_ids == ("ba-dev-003",)
         assert "Case filter:" in captured.out
 
     def test_run_accepts_zero_infrastructure_retries(
@@ -398,18 +702,18 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Allow disabling bounded infrastructure retries explicitly."""
-        repository = _Repository()
+        repository = EvalCliRepository()
 
         def ensure_model_ready(_settings: object) -> None:
             return None
 
-        _EvalRunner.received_infrastructure_retries = None
+        EvalCliRunner.received_infrastructure_retries = None
         monkeypatch.setattr(
             eval_cli,
             "ensure_ollama_model_ready",
             ensure_model_ready,
         )
-        monkeypatch.setattr(eval_cli, "EvalRunner", _EvalRunner)
+        monkeypatch.setattr(eval_cli, "EvalRunner", EvalCliRunner)
         monkeypatch.setattr(
             eval_cli,
             "JsonEvalResultRepository",
@@ -433,7 +737,7 @@ class TestEvalCli:
 
         assert exit_code == 0
         assert captured.err == ""
-        assert _EvalRunner.received_infrastructure_retries == 0
+        assert EvalCliRunner.received_infrastructure_retries == 0
 
     def test_unknown_case_id_fails_before_model_check(
         self,
@@ -479,7 +783,7 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Exercise read-only eval result commands."""
-        repository = _Repository()
+        repository = EvalCliRepository()
         labels_path = tmp_path / "labels.jsonl"
         labels_path.write_text(
             (
@@ -527,7 +831,7 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Display persisted judge status, scores, and validation errors."""
-        repository = _Repository()
+        repository = EvalCliRepository()
         repository.results["judged"] = _judged_error_result()
         monkeypatch.setattr(
             eval_cli,
@@ -551,7 +855,7 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Display infrastructure errors outside deterministic failures."""
-        repository = _Repository()
+        repository = EvalCliRepository()
         repository.results["infra"] = _infrastructure_result()
         monkeypatch.setattr(
             eval_cli,
@@ -577,7 +881,7 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Verbose show includes detailed sanitized diagnostics."""
-        repository = _Repository()
+        repository = EvalCliRepository()
         repository.results["verbose"] = _verbose_result()
         monkeypatch.setattr(
             eval_cli,
@@ -613,8 +917,8 @@ class TestEvalCli:
     ) -> None:
         """Return non-zero when a saved eval run is missing."""
 
-        def repository_factory() -> _Repository:
-            return _Repository()
+        def repository_factory() -> EvalCliRepository:
+            return EvalCliRepository()
 
         monkeypatch.setattr(
             eval_cli,
@@ -636,7 +940,7 @@ class TestEvalCli:
     ) -> None:
         """Check candidate and judge through local Ollama settings."""
         checked_models: list[str] = []
-        repository = _Repository()
+        repository = EvalCliRepository()
 
         def ensure_model_ready(settings: object) -> None:
             assert isinstance(settings, eval_cli.OllamaSettings)
@@ -647,7 +951,7 @@ class TestEvalCli:
             "ensure_ollama_model_ready",
             ensure_model_ready,
         )
-        monkeypatch.setattr(eval_cli, "EvalRunner", _EvalRunner)
+        monkeypatch.setattr(eval_cli, "EvalRunner", EvalCliRunner)
         monkeypatch.setattr(
             eval_cli,
             "JsonEvalResultRepository",
@@ -680,7 +984,7 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Display stored total duration for saved eval runs."""
-        repository = _Repository()
+        repository = EvalCliRepository()
         repository.results["timed"] = _timed_result()
         monkeypatch.setattr(
             eval_cli,
@@ -701,8 +1005,8 @@ class TestEvalCli:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Honor --no-progress even if stderr is interactive."""
-        repository = _Repository()
-        _EvalRunner.received_progress_reporter = object()
+        repository = EvalCliRepository()
+        EvalCliRunner.received_progress_reporter = object()
 
         def ensure_model_ready(_settings: object) -> None:
             return None
@@ -713,7 +1017,7 @@ class TestEvalCli:
             ensure_model_ready,
         )
         monkeypatch.setattr(eval_cli.sys.stderr, "isatty", lambda: True)
-        monkeypatch.setattr(eval_cli, "EvalRunner", _EvalRunner)
+        monkeypatch.setattr(eval_cli, "EvalRunner", EvalCliRunner)
         monkeypatch.setattr(
             eval_cli,
             "JsonEvalResultRepository",
@@ -735,7 +1039,7 @@ class TestEvalCli:
         captured = capsys.readouterr()
 
         assert exit_code == 0
-        assert _EvalRunner.received_progress_reporter is None
+        assert EvalCliRunner.received_progress_reporter is None
         assert captured.err == ""
 
 

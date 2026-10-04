@@ -85,6 +85,78 @@ class TestSkillMarkdownParser:
                 text=text,
             )
 
+    @pytest.mark.parametrize(
+        "text",
+        (
+            "---\nname: safe-skill\nBody without closing frontmatter.",
+            "---\nname: safe-skill\ndescription: "
+            + "x" * 4_001
+            + "\n---\nBody.",
+            "---\n name: safe-skill\n---\nBody.",
+            "---\nname safe-skill\n---\nBody.",
+            "---\n: safe-skill\n---\nBody.",
+            "---\nname: []\ndescription: Procedure.\n---\nBody.",
+            "---\nname: safe-skill\ndescription: Procedure.\n"
+            "allowed-tools: read_file\n---\nBody.",
+            "---\nname: safe-skill\ndescription: Procedure.\n---\n  ",
+        ),
+        ids=(
+            "unclosed-frontmatter",
+            "oversized-frontmatter",
+            "unsupported-indent",
+            "missing-separator",
+            "missing-key",
+            "nontext-name",
+            "nonlist-tool-metadata",
+            "empty-body",
+        ),
+    )
+    def test_rejects_malformed_metadata_before_exposing_instructions(
+        self, text: str
+    ) -> None:
+        """Fail closed for malformed or oversized procedural packages."""
+        with pytest.raises(InvalidAgentSkillError):
+            SkillMarkdownParser().parse_skill("safe-skill", "hash", text)
+
+    @pytest.mark.parametrize(
+        ("optional_fields", "version", "tools"),
+        (
+            ("", None, ()),
+            ("metadata: plain-text\nallowed-tools: []\n", None, ()),
+            ("metadata:\n  owner: local\n", None, ()),
+            ("metadata:\n  version: ''\n", None, ()),
+            (
+                "metadata:\n  version: '0.2.0'\n"
+                "allowed-tools: ['read_file', , '', \"find_symbol\"]\n",
+                "0.2.0",
+                ("read_file", "find_symbol"),
+            ),
+        ),
+        ids=(
+            "absent",
+            "empty-tools",
+            "no-version",
+            "blank-version",
+            "quoted-inline-list",
+        ),
+    )
+    def test_optional_metadata_keeps_portable_defaults(
+        self,
+        optional_fields: str,
+        version: str | None,
+        tools: tuple[str, ...],
+    ) -> None:
+        """Accept comments and optional metadata without creating authority."""
+        text = (
+            "---\n\n# Reviewed local procedure.\nname: safe-skill\n"
+            "description: Procedure.\n" + optional_fields + "---\nBody."
+        )
+        metadata = SkillMarkdownParser().parse_metadata(
+            "safe-skill", "hash", text
+        )
+        assert metadata.version == version
+        assert metadata.allowed_tools == tools
+
 
 def _skill_text(body: str = "Follow this procedure.") -> str:
     return (

@@ -40,6 +40,16 @@ def sanitize_full_text(value: object) -> str:
     return _redact_inline_secrets(text)
 
 
+def sanitize_diagnostic_text(value: object) -> str:
+    """Bound diagnostic text and omit absolute filesystem paths."""
+    text = re.sub(
+        r"(?<![\w:])(?:[A-Za-z]:[\\/]|/)[^\s,;\"'<>]+",
+        "[absolute path omitted]",
+        sanitize_full_text(value),
+    )
+    return sanitize_text(text)
+
+
 def sanitize_error(error: Exception) -> tuple[str, str]:
     """Return a sanitized error type and message."""
     return error.__class__.__name__, sanitize_text(error)

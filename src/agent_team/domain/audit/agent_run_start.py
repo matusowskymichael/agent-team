@@ -18,3 +18,4 @@ class AgentRunStart:
     feature_id: int | None = None
     task_id: int | None = None
     workspace_identity_hash: str | None = None
+    total_turn_limit: int | None = None

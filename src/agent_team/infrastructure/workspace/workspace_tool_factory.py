@@ -1,12 +1,15 @@
 """Agents SDK function tools for restricted workspace access."""
 
+import asyncio
 import json
+import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
 from agents import FunctionTool, Tool
+from agents.tool import set_function_tool_failure_error_function
 from agents.tool_context import ToolContext
 
 from agent_team.application.audit.audit_sanitizer import (
@@ -50,6 +53,7 @@ from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 # Any is required by the installed Agents SDK FunctionTool callable boundary.
 
 WORKSPACE_SERVER_NAME = "workspace"
+LOGGER = logging.getLogger(__name__)
 WORKSPACE_DENIED_PREFIX = "WORKSPACE_CAPABILITY_DENIED"
 WORKSPACE_DENIED_SUFFIX = (
     "Do not retry with different feature, task, role, or workspace values."
@@ -146,11 +150,10 @@ class WorkspaceToolFactory:
             _context: ToolContext[Any],
             arguments_json: str,
         ) -> dict[str, object]:
-            return self._invoke(
+            return await self._invoke_check(
                 profile,
                 run,
                 task,
-                WorkspaceToolName.RUN_CHECK,
                 arguments_json,
             )
 
@@ -163,18 +166,66 @@ class WorkspaceToolFactory:
             WorkspaceToolName.RUN_CHECK: run_check,
         }
         return [
-            FunctionTool(
-                name=tool.value,
-                description=_tool_description(tool),
-                params_json_schema=_tool_schema(tool, profile),
-                on_invoke_tool=callbacks[tool],
-                strict_json_schema=True,
+            set_function_tool_failure_error_function(
+                FunctionTool(
+                    name=tool.value,
+                    description=_tool_description(tool),
+                    params_json_schema=_tool_schema(tool, profile),
+                    on_invoke_tool=callbacks[tool],
+                    strict_json_schema=True,
+                ),
+                None,
             )
             for tool in sorted(
                 profile.allowed_workspace_tools,
                 key=lambda item: item.value,
             )
         ]
+
+    async def _invoke_check(
+        self,
+        profile: AgentProfile,
+        run: AgentRunRecord,
+        task: AgentTask,
+        arguments_json: str,
+    ) -> dict[str, object]:
+        if task.workspace_root is None:
+            return self._invoke(
+                profile,
+                run,
+                task,
+                WorkspaceToolName.RUN_CHECK,
+                arguments_json,
+            )
+        service = self.service_factory(task.workspace_root)
+
+        def bound_service(_root: Path) -> WorkspaceService:
+            return service
+
+        bound_factory = replace(self, service_factory=bound_service)
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                bound_factory._invoke,
+                profile,
+                run,
+                task,
+                WorkspaceToolName.RUN_CHECK,
+                arguments_json,
+            )
+        )
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            service.cancel_pending_operations()
+            done, _ = await asyncio.wait(
+                (worker,),
+                timeout=task.watchdogs.cleanup_grace_seconds,
+            )
+            if worker in done and not worker.cancelled():
+                worker.exception()
+            elif worker not in done:
+                LOGGER.warning("Workspace command cleanup did not finish.")
+            raise
 
     def _invoke(
         self,
@@ -221,7 +272,7 @@ class WorkspaceToolFactory:
             return _denied_response(error)
         except Exception as error:
             self._mark_failed(invocation.id, error)
-            return _failed_response(error)
+            raise
 
         payload = _result_payload(result)
         result_hash, result_preview = sanitize_tool_result(tool.value, payload)
@@ -470,14 +521,6 @@ def _denied_response(
             f"{WORKSPACE_DENIED_PREFIX}: {error_message}. "
             f"{WORKSPACE_DENIED_SUFFIX}"
         ),
-        "error_type": error_type,
-    }
-
-
-def _failed_response(error: Exception) -> dict[str, object]:
-    error_type, error_message = sanitize_error(error)
-    return {
-        "error": f"WORKSPACE_TOOL_FAILED: {error_message}",
         "error_type": error_type,
     }
 

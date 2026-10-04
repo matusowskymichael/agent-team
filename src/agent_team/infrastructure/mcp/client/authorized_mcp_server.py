@@ -35,6 +35,9 @@ from agent_team.domain.workspace.workspace_tool_name import WorkspaceToolName
 from agent_team.infrastructure.mcp.client.development_workflow_mcp_server_config import (  # noqa: E501
     DevelopmentWorkflowMCPServerConfig,
 )
+from agent_team.infrastructure.mcp.client.mcp_process_cleanup import (
+    MCPProcessCleanup,
+)
 
 # Any is required by the installed Agents SDK MCPServer abstract methods.
 # The installed MCP Tool schema uses dict[str, Any], so schema boundary casts
@@ -120,6 +123,11 @@ class AuthorizedMCPServer(MCPServer):
         """Clean up the delegate server."""
         await self.delegate.cleanup()
 
+    def force_cleanup(self) -> None:
+        """Terminate the owned delegate process without replaying tools."""
+        if isinstance(self.delegate, MCPProcessCleanup):
+            self.delegate.force_cleanup()
+
     async def list_tools(
         self,
         run_context: RunContextWrapper[Any] | None = None,
@@ -198,6 +206,13 @@ class AuthorizedMCPServer(MCPServer):
                 raise audit_error from error
             raise
 
+        if result.is_error:
+            self.audit_repository.fail_tool_invocation(
+                invocation_id=invocation.id,
+                error_type="MCPToolError",
+                error_message="MCP tool reported failure.",
+            )
+            return result
         result_hash, result_preview = sanitize_tool_result(tool_name, result)
         self.audit_repository.complete_tool_invocation(
             invocation_id=invocation.id,

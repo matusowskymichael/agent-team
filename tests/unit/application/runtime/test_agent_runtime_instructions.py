@@ -212,7 +212,7 @@ class TestAgentRuntimeInstructions:
             "Available workspace checks:",
         )
         assert 'run_check(name="backend")' in instructions
-        assert "Runtime supplies checks_attempted" in instructions
+        assert "Runtime supplies changed_paths" in instructions
         assert "Use individual ruff, pyright, or pytest checks only" in (
             instructions
         )
@@ -245,10 +245,45 @@ class TestAgentRuntimeInstructions:
             "ruff",
         }
         assert 'run_check(name="frontend")' in instructions
-        assert "Runtime supplies checks_attempted" in instructions
+        assert "Runtime supplies changed_paths" in instructions
         assert "Use individual ruff or pytest checks only" in instructions
         assert "call find_symbol for every proposed" in instructions
         assert "nearby tests" in instructions
+
+    @pytest.mark.parametrize(
+        ("role", "check"),
+        [
+            (DevelopmentRole.BACKEND_DEVELOPER, "backend"),
+            (DevelopmentRole.FRONTEND_DEVELOPER, "frontend"),
+        ],
+    )
+    def test_developer_execution_sequence(
+        self,
+        role: DevelopmentRole,
+        check: str,
+    ) -> None:
+        """Require discovery, activation, and verified handoff ordering."""
+        profile = AgentProfileCatalog().get_profile(role)
+
+        instructions = build_runtime_instructions(profile)
+
+        steps = (
+            "Read the assigned",
+            "bounded discovery",
+            "AuthService.logout",
+            "call update_task_status",
+            "Only then call apply_patch",
+            f'run_check(name="{check}")',
+            "immediately call\nsubmit_task_for_verification",
+            "final response after deterministic verification",
+        )
+        positions = [instructions.index(step) for step in steps]
+        assert positions == sorted(positions)
+        assert "known to be absent" in instructions
+        assert "repair, rerun the aggregate" in instructions
+        assert "changed_paths from audited successful patches" in instructions
+        assert "checks_attempted from audited completed checks" in instructions
+        assert "either argument yourself" in instructions
 
     @pytest.mark.parametrize(
         "role",

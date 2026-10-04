@@ -51,6 +51,15 @@ class AgentAuditRepository(Protocol):
         """Record sanitized model-generation metadata for an agent run."""
         ...
 
+    def record_run_progress(
+        self,
+        run_id: int,
+        segment_count: int,
+        termination_reason: str | None = None,
+    ) -> AgentRunRecord:
+        """Record segment count and a sanitized logical termination reason."""
+        ...
+
     def start_tool_invocation(
         self,
         invocation: ToolInvocationStart,

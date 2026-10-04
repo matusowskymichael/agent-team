@@ -5,7 +5,7 @@ from typing import Literal, cast
 
 import httpx2
 import pytest
-from agents import Tool
+from agents import MaxTurnsExceeded, Tool
 from agents.mcp import MCPServer
 from agents.memory import Session
 from openai import APIConnectionError
@@ -121,6 +121,8 @@ class TestOllamaAgentExecutor:
 
         assert tracing_calls == [True]
         assert result.response == "Local answer."
+        assert result.segment_exhausted is False
+        assert result.turns_used == 1
         assert result.generation_metadata is not None
         assert result.generation_metadata.model == "qwen3.5:9b"
         assert result.generation_metadata.finish_reason is None
@@ -198,7 +200,7 @@ class TestOllamaAgentExecutor:
                 profile,
             )
             assert prompt == "Create a feature."
-            assert kwargs["max_turns"] == profile.run_limits.max_turns
+            assert kwargs["max_turns"] == profile.run_limits.segment_turns
             run_config = kwargs["run_config"]
             assert isinstance(run_config, ollama_agent_executor.RunConfig)
             assert run_config.tracing_disabled is True
@@ -567,6 +569,48 @@ class TestOllamaAgentExecutor:
         assert result.generation_metadata.output_tokens == 60
         assert result.generation_metadata.visible_output_char_count == 15
         assert result.generation_metadata.objectively_truncated is True
+        assert result.turns_used == 2
+
+    def test_execute_translates_segment_exhaustion_without_run_data(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Treat segment exhaustion as control flow even without SDK data."""
+        calls: list[str] = []
+
+        async def run_agent(
+            *_args: object,
+            **_kwargs: object,
+        ) -> FakeRunResult:
+            calls.append("run")
+            raise MaxTurnsExceeded("Max turns exceeded")
+
+        monkeypatch.setattr(
+            ollama_agent_executor.Runner,
+            "run",
+            run_agent,
+        )
+        settings = OllamaSettings()
+        executor = OllamaAgentExecutor(
+            model=create_ollama_model(settings),
+            settings=settings,
+        )
+        profile = _profile()
+
+        result = asyncio.run(
+            executor.execute(
+                AgentTask(prompt="Finish the task."),
+                profile,
+                _run_record(profile.role),
+            ),
+        )
+
+        assert calls == ["run"]
+        assert result.response == ""
+        assert result.segment_exhausted is True
+        assert result.turns_used == profile.run_limits.segment_turns
+        assert result.generation_metadata is not None
+        assert result.generation_metadata.input_tokens is None
 
     def test_execute_omits_hidden_reasoning_from_response(
         self,

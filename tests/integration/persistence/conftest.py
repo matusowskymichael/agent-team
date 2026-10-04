@@ -7,7 +7,66 @@ from pathlib import Path
 
 import pytest
 
+from agent_team.domain.runtime.development_role import DevelopmentRole
+from agent_team.domain.workflow.development_task import DevelopmentTask
+from agent_team.domain.workflow.feature_status import FeatureStatus
+from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
+from agent_team.domain.workflow.task_status import TaskStatus
+from agent_team.infrastructure.persistence.sqlite.workflow import (
+    sqlite_workflow_repository as workflow_repository_module,
+)
 from tests.reporting.allure_steps import fixture_title
+
+
+@pytest.fixture
+def persisted_pending_task(
+    tmp_path: Path,
+) -> tuple[
+    workflow_repository_module.SQLiteWorkflowRepository, DevelopmentTask
+]:
+    """Create an assigned pending task in a disposable local database."""
+    repository = workflow_repository_module.SQLiteWorkflowRepository(
+        tmp_path / "workflow.db",
+    )
+    feature = repository.create_feature(
+        "Feature",
+        "Description",
+        FeatureStatus.IMPLEMENTATION,
+    )
+    task = repository.create_task(
+        feature.id,
+        "Task",
+        "Description",
+        DevelopmentRole.BACKEND_DEVELOPER,
+        TaskStatus.PENDING,
+    )
+    return repository, task
+
+
+@pytest.fixture
+def persisted_backend_handoff(
+    persisted_pending_task: tuple[
+        workflow_repository_module.SQLiteWorkflowRepository,
+        DevelopmentTask,
+    ],
+) -> TaskHandoffDraft:
+    """Provide a valid draft bound to the persisted backend task."""
+    _, task = persisted_pending_task
+    return TaskHandoffDraft(
+        task_id=task.id,
+        agent_run_id=1,
+        submitted_by=DevelopmentRole.BACKEND_DEVELOPER,
+        attribution="agent:backend_developer",
+        workspace_identity_hash="workspace-hash",
+        implementation_summary="Updated the assigned backend behavior.",
+        changed_paths=("backend/auth.py",),
+        reused_symbols=("AuthService",),
+        new_symbols=(),
+        reuse_notes="Extended the existing service.",
+        checks_attempted=("backend",),
+        limitations="none",
+        next_action="verify",
+    )
 
 
 @pytest.fixture
@@ -20,6 +79,36 @@ def legacy_audit_database(tmp_path: Path) -> Path:
         _create_legacy_audit_schema(connection)
         _insert_legacy_audit_rows(connection)
     return database_path
+
+
+@pytest.fixture
+@fixture_title("Create an audit database before logical run progress")
+def audit_database_before_run_progress(legacy_audit_database: Path) -> Path:
+    """Preserve v4 feature, task, workspace, and session attribution."""
+    with (
+        closing(sqlite3.connect(legacy_audit_database)) as connection,
+        connection,
+    ):
+        for name, column_type in (
+            ("session_id", "TEXT"),
+            ("feature_id", "INTEGER"),
+            ("generation_metadata_json", "TEXT"),
+            ("task_id", "INTEGER"),
+            ("workspace_identity_hash", "TEXT"),
+        ):
+            connection.execute(
+                f"ALTER TABLE agent_runs ADD COLUMN {name} {column_type}",
+            )
+        connection.execute(
+            """
+            UPDATE agent_runs
+            SET session_id = 'legacy-session', feature_id = 2, task_id = 3,
+                workspace_identity_hash = 'legacy-workspace'
+            WHERE id = 1
+            """,
+        )
+        connection.execute("PRAGMA user_version = 4")
+    return legacy_audit_database
 
 
 @pytest.fixture

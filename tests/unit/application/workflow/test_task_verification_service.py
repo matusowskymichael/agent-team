@@ -18,6 +18,9 @@ from agent_team.domain.workflow import (
     task_verification_failure_classification as failure_classification,
 )
 from agent_team.domain.workflow.development_task import DevelopmentTask
+from agent_team.domain.workflow.development_task_not_found_error import (
+    DevelopmentTaskNotFoundError,
+)
 from agent_team.domain.workflow.feature_status import FeatureStatus
 from agent_team.domain.workflow.task_handoff import TaskHandoff
 from agent_team.domain.workflow.task_handoff_draft import TaskHandoffDraft
@@ -94,6 +97,94 @@ FailureClassification = (
 
 class TestTaskVerificationService:
     """TaskVerificationService behavior tests."""
+
+    def test_verification_rejects_nonpending_submission(self) -> None:
+        """Do not run a verifier after the submitted task was reopened."""
+        repository, task_id = _submitted_task()
+        repository.update_task_status(task_id, TaskStatus.IN_PROGRESS)
+        verifier = _FakeVerifier(
+            _verification_result(TaskVerificationOutcome.PASSED),
+        )
+
+        with pytest.raises(TaskTransitionError, match="not awaiting"):
+            TaskVerificationService(repository, verifier).verify_task(
+                task_id,
+                Path("workspace"),
+            )
+
+        assert verifier.calls == 0
+        assert repository.latest_task_verification(task_id) is None
+
+    def test_verification_rejects_missing_task(self) -> None:
+        """Query authoritative state before accepting a task identifier."""
+        verifier = _FakeVerifier(
+            _verification_result(TaskVerificationOutcome.PASSED),
+        )
+        service = TaskVerificationService(FakeWorkflowRepository(), verifier)
+
+        with pytest.raises(DevelopmentTaskNotFoundError, match="404"):
+            service.verify_task_if_pending(404, Path("workspace"))
+
+        assert verifier.calls == 0
+
+    def test_invalid_contract_blocks_without_execution(self) -> None:
+        """Fail closed when a submitted verification contract disappears."""
+        repository, task_id = _submitted_task()
+        task = repository.get_task(task_id)
+        assert task is not None
+        repository.tasks[task_id] = replace(task, verification_contract=None)
+        verifier = _FakeVerifier(
+            _verification_result(TaskVerificationOutcome.PASSED),
+        )
+
+        evidence = TaskVerificationService(repository, verifier).verify_task(
+            task_id,
+            Path("workspace"),
+        )
+
+        assert evidence.outcome is TaskVerificationOutcome.BLOCKED
+        assert evidence.failure_classification is (
+            FailureClassification.CONFIGURATION_ERROR
+        )
+        assert evidence.checks == ()
+        assert verifier.calls == 0
+        current = repository.get_task(task_id)
+        assert current is not None
+        assert current.status is TaskStatus.BLOCKED
+
+    @pytest.mark.parametrize("workspace_hash", [None, " "])
+    def test_legacy_workspace_identity_rejects_untrusted_audit(
+        self,
+        workspace_hash: str | None,
+    ) -> None:
+        """Reject legacy provenance if the audit lacks a workspace binding."""
+        repository, task_id = _submitted_task()
+        handoff = repository.latest_task_handoff(task_id)
+        assert handoff is not None
+        repository.handoffs[handoff.id] = replace(
+            handoff,
+            workspace_identity_hash=None,
+        )
+        verifier = _FakeVerifier(
+            _verification_result(TaskVerificationOutcome.PASSED),
+        )
+        reader = FakeAgentAuditReader(
+            runs=[
+                replace(
+                    make_agent_run_record(handoff.agent_run_id),
+                    workspace_identity_hash=workspace_hash,
+                )
+            ],
+        )
+
+        with pytest.raises(TaskVerificationWorkspaceError, match="trusted"):
+            TaskVerificationService(repository, verifier, reader).verify_task(
+                task_id,
+                Path("workspace"),
+            )
+
+        assert verifier.calls == 0
+        assert repository.latest_task_verification(task_id) is None
 
     def test_successful_verification_marks_task_completed(self) -> None:
         """Persist passed evidence and complete the task."""
